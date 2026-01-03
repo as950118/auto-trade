@@ -1,7 +1,7 @@
 from rest_framework import viewsets, status, filters
-from rest_framework.decorators import action
+from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from django.db.models import Q
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
@@ -9,11 +9,33 @@ from decimal import Decimal
 from .models import Order, Account, Symbol, Broker, Country, OrderStatus, DailyRealizedProfit
 from .serializers import (
     OrderCreateSerializer, OrderSerializer, OrderUpdateSerializer,
-    AccountSerializer, SymbolSerializer, DailyRealizedProfitSerializer
+    AccountSerializer, SymbolSerializer, DailyRealizedProfitSerializer,
+    UserSerializer
 )
 from .profit_calculator import ProfitCalculator
 from datetime import date as date_type
 from .views_profit import DailyRealizedProfitViewSet
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def signup(request):
+    """회원가입"""
+    serializer = UserSerializer(data=request.data)
+    if serializer.is_valid():
+        user = serializer.save()
+        return Response(
+            {
+                'message': '회원가입이 완료되었습니다.',
+                'user': {
+                    'id': user.id,
+                    'username': user.username,
+                    'email': user.email
+                }
+            },
+            status=status.HTTP_201_CREATED
+        )
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 class AccountViewSet(viewsets.ModelViewSet):
