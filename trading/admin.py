@@ -11,8 +11,8 @@ class BrokerAdmin(admin.ModelAdmin):
 
 @admin.register(Symbol)
 class SymbolAdmin(admin.ModelAdmin):
-    list_display = ['ticker', 'name', 'currency', 'broker', 'is_crypto', 'created_at']
-    list_filter = ['currency', 'is_crypto', 'broker']
+    list_display = ['ticker', 'name', 'currency', 'broker', 'is_crypto', 'is_delisted', 'created_at']
+    list_filter = ['currency', 'is_crypto', 'is_delisted', 'broker']
     search_fields = ['ticker', 'name']
 
 

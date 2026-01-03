@@ -3,12 +3,17 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import Q
+from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
-from .models import Order, Account, Symbol, Broker, Country, OrderStatus
+from decimal import Decimal
+from .models import Order, Account, Symbol, Broker, Country, OrderStatus, DailyRealizedProfit
 from .serializers import (
     OrderCreateSerializer, OrderSerializer, OrderUpdateSerializer,
-    AccountSerializer, SymbolSerializer
+    AccountSerializer, SymbolSerializer, DailyRealizedProfitSerializer
 )
+from .profit_calculator import ProfitCalculator
+from datetime import date as date_type
+from .views_profit import DailyRealizedProfitViewSet
 
 
 class AccountViewSet(viewsets.ModelViewSet):
@@ -180,7 +185,7 @@ class SymbolViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class = SymbolSerializer
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['broker', 'currency', 'is_crypto']
+    filterset_fields = ['broker', 'currency', 'is_crypto', 'is_delisted']
     search_fields = ['ticker', 'name']
     ordering_fields = ['ticker', 'name', 'created_at']
     ordering = ['ticker']
@@ -211,6 +216,11 @@ class SymbolViewSet(viewsets.ReadOnlyModelViewSet):
             else:
                 queryset = queryset.filter(is_crypto=False)
         
+        # 상장폐지 여부 필터링 (기본값: 상장폐지되지 않은 종목만)
+        include_delisted = self.request.query_params.get('include_delisted', 'false')
+        if include_delisted.lower() != 'true':
+            queryset = queryset.filter(is_delisted=False)
+        
         return queryset
     
     @action(detail=False, methods=['get'])
@@ -224,6 +234,11 @@ class SymbolViewSet(viewsets.ReadOnlyModelViewSet):
             brokers = Broker.objects.filter(country=country, is_crypto_exchange=False)
             queryset = queryset.filter(broker__in=brokers)
         
+        # 상장폐지 여부 필터링
+        include_delisted = request.query_params.get('include_delisted', 'false')
+        if include_delisted.lower() != 'true':
+            queryset = queryset.filter(is_delisted=False)
+        
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
     
@@ -236,6 +251,11 @@ class SymbolViewSet(viewsets.ReadOnlyModelViewSet):
         broker_id = request.query_params.get('broker_id', None)
         if broker_id:
             queryset = queryset.filter(broker_id=broker_id)
+        
+        # 상장폐지 여부 필터링
+        include_delisted = request.query_params.get('include_delisted', 'false')
+        if include_delisted.lower() != 'true':
+            queryset = queryset.filter(is_delisted=False)
         
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)

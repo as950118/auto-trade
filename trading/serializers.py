@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth.models import User
-from .models import Order, Account, Symbol, Broker, Country, Currency
+from .models import Order, Account, Symbol, Broker, DailyRealizedProfit
 
 
 class BrokerSerializer(serializers.ModelSerializer):
@@ -22,7 +22,8 @@ class SymbolSerializer(serializers.ModelSerializer):
         model = Symbol
         fields = [
             'id', 'ticker', 'name', 'currency', 'currency_display', 
-            'broker', 'broker_id', 'is_crypto', 'created_at', 'updated_at'
+            'broker', 'broker_id', 'is_crypto', 'is_delisted', 
+            'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at']
 
@@ -60,6 +61,19 @@ class AccountSerializer(serializers.ModelSerializer):
         except Broker.DoesNotExist:
             raise serializers.ValidationError("존재하지 않는 브로커입니다.")
         return value
+
+
+class DailyRealizedProfitSerializer(serializers.ModelSerializer):
+    """일일 실현 손익 시리얼라이저"""
+    account = AccountSerializer(read_only=True)
+    
+    class Meta:
+        model = DailyRealizedProfit
+        fields = [
+            'id', 'account', 'date', 'realized_profit', 'realized_profit_rate',
+            'total_buy_amount', 'total_sell_amount', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
 
 
 class OrderCreateSerializer(serializers.ModelSerializer):

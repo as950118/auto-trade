@@ -13,16 +13,21 @@ logger = logging.getLogger(__name__)
 def process_orders():
     """대기중인 주문들을 처리"""
     pending_orders = Order.objects.filter(status=OrderStatus.PENDING)
+    pending_count = pending_orders.count()
     
-    logger.info(f"처리할 주문 수: {pending_orders.count()}")
+    logger.info(f"처리할 주문 수: {pending_count}")
     
+    processed_count = 0
     for order in pending_orders:
         try:
             process_order(order)
+            processed_count += 1
         except Exception as e:
             logger.error(f"주문 처리 실패 (Order ID: {order.id}): {str(e)}")
             order.status = OrderStatus.REJECTED
             order.save()
+    
+    return processed_count
 
 
 def process_order(order: Order):
@@ -125,10 +130,22 @@ def check_order_status(order: Order, client=None):
                     
                     if state == 'done':
                         # 체결 완료
+                        was_filled = order.status == OrderStatus.FILLED
                         order.status = OrderStatus.FILLED
                         order.filled_quantity = Decimal(str(executed_volume))
                         order.average_filled_price = Decimal(str(avg_price)) if avg_price > 0 else None
                         order.filled_at = timezone.now()
+                        
+                        # 매도 주문이고 새로 체결된 경우 실현 손익 계산
+                        if not was_filled and order.side == 'SELL':
+                            from .profit_calculator import ProfitCalculator
+                            try:
+                                ProfitCalculator.update_daily_realized_profit(
+                                    order.account,
+                                    order.filled_at.date()
+                                )
+                            except Exception as e:
+                                logger.error(f"실현 손익 계산 실패 (Order ID: {order.id}): {str(e)}")
                     elif state == 'cancel':
                         # 취소됨
                         order.status = OrderStatus.CANCELLED

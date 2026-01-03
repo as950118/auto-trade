@@ -80,6 +80,20 @@ SCHEDULER_AUTOSTART = True
 # 주문 처리 간격 (분 단위, 기본값: 1분)
 ORDER_PROCESSING_INTERVAL_MINUTES = 1
 
+# 종목 크롤링 간격 (시간 단위, 기본값: 1시간)
+SYMBOL_CRAWL_INTERVAL_HOURS = 1
+
+# Telegram 알림 설정
+TELEGRAM_NEW_CUSTOMER = {
+    'token': '6531210607:AAH12INQhJY-s87ygzSQ6KYnrooc9o44e84',
+    'chat_id': '-1001997424622',
+}
+
+TELEGRAM_SERVER_SCHEDULER = {
+    'token': '6531210607:AAH12INQhJY-s87ygzSQ6KYnrooc9o44e84',
+    'chat_id': '-1002018373466',
+}
+
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',

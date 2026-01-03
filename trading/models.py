@@ -62,6 +62,7 @@ class Symbol(models.Model):
         verbose_name='브로커'
     )
     is_crypto = models.BooleanField(default=False, verbose_name='암호화폐 여부')
+    is_delisted = models.BooleanField(default=False, verbose_name='상장폐지 여부')
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='생성일시')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='수정일시')
 
@@ -277,3 +278,53 @@ class Order(models.Model):
         if self.status == OrderStatus.FILLED and not self.filled_at:
             self.filled_at = timezone.now()
         super().save(*args, **kwargs)
+
+
+class DailyRealizedProfit(models.Model):
+    """일일 실현 손익"""
+    account = models.ForeignKey(
+        Account,
+        on_delete=models.CASCADE,
+        related_name='daily_profits',
+        verbose_name='계좌'
+    )
+    date = models.DateField(verbose_name='날짜')
+    realized_profit = models.DecimalField(
+        max_digits=20,
+        decimal_places=2,
+        default=0,
+        verbose_name='실현 손익'
+    )
+    realized_profit_rate = models.DecimalField(
+        max_digits=10,
+        decimal_places=4,
+        default=0,
+        verbose_name='실현 손익률 (%)'
+    )
+    total_buy_amount = models.DecimalField(
+        max_digits=20,
+        decimal_places=2,
+        default=0,
+        verbose_name='총 매수 금액'
+    )
+    total_sell_amount = models.DecimalField(
+        max_digits=20,
+        decimal_places=2,
+        default=0,
+        verbose_name='총 매도 금액'
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='생성일시')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='수정일시')
+
+    class Meta:
+        verbose_name = '일일 실현 손익'
+        verbose_name_plural = '일일 실현 손익들'
+        unique_together = ['account', 'date']
+        ordering = ['-date']
+        indexes = [
+            models.Index(fields=['account', 'date']),
+            models.Index(fields=['date']),
+        ]
+
+    def __str__(self):
+        return f"{self.account.user.username} - {self.date} - {self.realized_profit}"
