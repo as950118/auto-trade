@@ -1,0 +1,9 @@
+Django==4.2.27
+django-apscheduler==0.7.0
+django-filter==25.1
+djangorestframework==3.16.1
+djangorestframework_simplejwt==5.5.1
+pandas==2.3.3
+pyupbit==0.2.34
+requests==2.32.5
+websockets==15.0.1
