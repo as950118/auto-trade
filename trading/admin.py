@@ -4,9 +4,9 @@ from .models import Broker, Symbol, Account, Order
 
 @admin.register(Broker)
 class BrokerAdmin(admin.ModelAdmin):
-    list_display = ['name', 'country', 'is_crypto_exchange', 'created_at']
+    list_display = ['code', 'name', 'country', 'is_crypto_exchange', 'created_at']
     list_filter = ['country', 'is_crypto_exchange']
-    search_fields = ['name']
+    search_fields = ['code', 'name']
 
 
 @admin.register(Symbol)

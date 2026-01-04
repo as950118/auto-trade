@@ -40,7 +40,7 @@ class BrokerSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = Broker
-        fields = ['id', 'name', 'country', 'country_display', 'is_crypto_exchange', 'created_at', 'updated_at']
+        fields = ['id', 'code', 'name', 'country', 'country_display', 'is_crypto_exchange', 'created_at', 'updated_at']
 
 
 class SymbolSerializer(serializers.ModelSerializer):

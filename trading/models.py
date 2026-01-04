@@ -24,6 +24,12 @@ class Country(models.TextChoices):
 
 class Broker(models.Model):
     """주식브로커(증권사, 암호화폐거래소 등)"""
+    code = models.CharField(
+        max_length=50,
+        unique=True,
+        verbose_name='브로커 코드',
+        help_text='시스템에서 사용하는 고유 식별자 (예: UPBIT, BINGX, KIS)'
+    )
     name = models.CharField(max_length=100, verbose_name='브로커명')
     country = models.CharField(
         max_length=2,
