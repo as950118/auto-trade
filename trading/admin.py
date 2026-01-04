@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Broker, Symbol, Account, Order
+from .models import Broker, Symbol, Account, Order, Holding
 
 
 @admin.register(Broker)
@@ -25,17 +25,27 @@ class AccountAdmin(admin.ModelAdmin):
     ]
     list_filter = ['broker', 'buy_enabled', 'sell_enabled', 'unified_margin']
     search_fields = ['user__username', 'account_number', 'broker__name']
-    readonly_fields = ['total_assets', 'cash_balance', 'stock_value', 'profit_rate', 'created_at', 'updated_at']
+    readonly_fields = [
+        'total_assets', 'cash_balance', 'stock_value', 'profit_rate',  # property 필드
+        'cash_balance_krw', 'stock_value_krw', 'total_assets_krw',  # 통화별 필드
+        'cash_balance_usd', 'stock_value_usd', 'total_assets_usd',  # 통화별 필드
+        'access_token', 'refresh_token', 'token_expires_at', 'token_issued_at',
+        'created_at', 'updated_at'
+    ]
     
     fieldsets = (
         ('기본 정보', {
             'fields': ('user', 'broker', 'account_number', 'account_password')
         }),
         ('API 정보', {
-            'fields': ('api_key', 'api_secret')
+            'fields': ('api_key', 'api_secret', 'access_token', 'refresh_token', 'token_expires_at', 'token_issued_at')
         }),
         ('자산 정보', {
-            'fields': ('total_assets', 'cash_balance', 'stock_value', 'profit_rate')
+            'fields': (
+                'total_assets', 'cash_balance', 'stock_value', 'profit_rate',
+                'cash_balance_krw', 'stock_value_krw', 'total_assets_krw',
+                'cash_balance_usd', 'stock_value_usd', 'total_assets_usd'
+            )
         }),
         ('거래 제한 설정', {
             'fields': ('investment_limit', 'buy_enabled', 'sell_enabled')
@@ -65,6 +75,32 @@ class OrderAdmin(admin.ModelAdmin):
         }),
         ('체결 정보', {
             'fields': ('status', 'external_order_id', 'filled_quantity', 'average_filled_price', 'filled_at')
+        }),
+        ('시스템 정보', {
+            'fields': ('created_at', 'updated_at')
+        }),
+    )
+
+
+@admin.register(Holding)
+class HoldingAdmin(admin.ModelAdmin):
+    list_display = [
+        'account', 'symbol', 'quantity', 'average_price', 'current_price',
+        'total_value', 'profit_loss', 'profit_rate', 'updated_at'
+    ]
+    list_filter = ['account__broker', 'updated_at']
+    search_fields = ['account__user__username', 'symbol__ticker', 'symbol__name']
+    readonly_fields = ['total_value', 'profit_loss', 'profit_rate', 'created_at', 'updated_at']
+    
+    fieldsets = (
+        ('기본 정보', {
+            'fields': ('account', 'symbol')
+        }),
+        ('보유 정보', {
+            'fields': ('quantity', 'average_price', 'current_price')
+        }),
+        ('평가 정보', {
+            'fields': ('total_value', 'profit_loss', 'profit_rate')
         }),
         ('시스템 정보', {
             'fields': ('created_at', 'updated_at')

@@ -37,6 +37,15 @@ def start_scheduler():
         replace_existing=True,
     )
     
+    # 계좌 정보 업데이트 작업 등록 (1분마다 실행)
+    scheduler.add_job(
+        update_accounts_info_job,
+        trigger=IntervalTrigger(minutes=1),
+        id='update_accounts_info',
+        name='계좌 정보 업데이트',
+        replace_existing=True,
+    )
+    
     # 일일 실현 손익 계산 작업 등록 (매일 자정에 실행)
     from apscheduler.triggers.cron import CronTrigger
     scheduler.add_job(
@@ -124,6 +133,44 @@ def crawl_symbols_job():
         notify_scheduler(
             f"❌ 종목 크롤링 실패\n\n오류: {str(e)}",
             job_name="종목 크롤링"
+        )
+
+
+def update_accounts_info_job():
+    """계좌 정보 업데이트 작업 (스케줄러에서 호출)"""
+    from .tasks import update_accounts_info
+    from .notifications import notify_scheduler
+    from .models import Account
+    
+    try:
+        # 업데이트 전 계좌 수
+        total_count = Account.objects.count()
+        
+        # 계좌 정보 업데이트
+        updated_count = update_accounts_info()
+        
+        # 업데이트 성공한 계좌들의 총 자산 합계
+        total_assets_sum = sum(
+            float(acc.total_assets) 
+            for acc in Account.objects.all() 
+            if acc.total_assets
+        )
+        
+        message = f"✅ 계좌 정보 업데이트 완료\n\n"
+        message += f"전체 계좌: {total_count}개\n"
+        message += f"업데이트 성공: {updated_count}개\n"
+        if total_assets_sum > 0:
+            message += f"총 자산 합계: {total_assets_sum:,.0f}원"
+        
+        # 에러가 있거나 업데이트 실패한 계좌가 있는 경우에만 알림
+        if updated_count < total_count:
+            notify_scheduler(message, job_name="계좌 정보 업데이트")
+    except Exception as e:
+        error_msg = f"계좌 정보 업데이트 작업 실행 중 오류: {str(e)}"
+        logger.error(error_msg)
+        notify_scheduler(
+            f"❌ 계좌 정보 업데이트 실패\n\n오류: {str(e)}",
+            job_name="계좌 정보 업데이트"
         )
 
 

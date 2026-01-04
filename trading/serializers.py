@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
-from .models import Order, Account, Symbol, Broker, DailyRealizedProfit
+from .models import Order, Account, Symbol, Broker, DailyRealizedProfit, Holding
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -70,17 +70,29 @@ class AccountSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'user', 'broker', 'broker_id', 'account_number', 
             'account_password', 'api_key', 'api_secret',
+            'access_token', 'refresh_token', 'token_expires_at', 'token_issued_at',
+            # 호환성 필드 (원화 기준)
             'total_assets', 'cash_balance', 'stock_value', 'profit_rate',
+            # 통화별 필드
+            'cash_balance_krw', 'stock_value_krw', 'total_assets_krw',
+            'cash_balance_usd', 'stock_value_usd', 'total_assets_usd',
             'investment_limit', 'buy_enabled', 'sell_enabled',
             'unified_margin', 'overseas_etp_enabled', 'derivative_etf_enabled',
             'created_at', 'updated_at'
         ]
         read_only_fields = [
-            'id', 'user', 'total_assets', 'cash_balance', 'stock_value', 
-            'profit_rate', 'created_at', 'updated_at'
+            'id', 'user', 
+            # 호환성 필드
+            'total_assets', 'cash_balance', 'stock_value', 'profit_rate',
+            # 통화별 필드
+            'cash_balance_krw', 'stock_value_krw', 'total_assets_krw',
+            'cash_balance_usd', 'stock_value_usd', 'total_assets_usd',
+            'access_token', 'refresh_token', 'token_expires_at', 
+            'token_issued_at', 'created_at', 'updated_at'
         ]
         extra_kwargs = {
-            'account_password': {'write_only': True},
+            'account_number': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'account_password': {'write_only': True, 'required': False, 'allow_blank': True, 'allow_null': True},
             'api_key': {'write_only': True},
             'api_secret': {'write_only': True},
         }
@@ -88,10 +100,30 @@ class AccountSerializer(serializers.ModelSerializer):
     def validate_broker_id(self, value):
         """브로커 존재 확인"""
         try:
-            Broker.objects.get(id=value)
+            broker = Broker.objects.get(id=value)
         except Broker.DoesNotExist:
             raise serializers.ValidationError("존재하지 않는 브로커입니다.")
         return value
+    
+    def validate(self, attrs):
+        """계좌번호 및 계좌비밀번호 유효성 검사"""
+        broker_id = attrs.get('broker_id')
+        account_number = attrs.get('account_number', '')
+        account_password = attrs.get('account_password', '')
+        
+        if broker_id:
+            try:
+                broker = Broker.objects.get(id=broker_id)
+                # 암호화폐 거래소가 아닌 경우 계좌번호 필수
+                if not broker.is_crypto_exchange:
+                    if not account_number:
+                        raise serializers.ValidationError({
+                            'account_number': '증권사 계좌는 계좌번호가 필수입니다.'
+                        })
+            except Broker.DoesNotExist:
+                pass  # broker_id validation에서 이미 처리됨
+        
+        return attrs
 
 
 class DailyRealizedProfitSerializer(serializers.ModelSerializer):
@@ -179,6 +211,23 @@ class OrderUpdateSerializer(serializers.ModelSerializer):
         if order.status != 'PENDING':
             raise serializers.ValidationError("대기중인 주문만 수정할 수 있습니다.")
         return attrs
+
+
+class HoldingSerializer(serializers.ModelSerializer):
+    """보유 종목 시리얼라이저"""
+    account = AccountSerializer(read_only=True)
+    symbol = SymbolSerializer(read_only=True)
+    
+    class Meta:
+        model = Holding
+        fields = [
+            'id', 'account', 'symbol', 'quantity', 'average_price', 'current_price',
+            'total_value', 'profit_loss', 'profit_rate', 'created_at', 'updated_at'
+        ]
+        read_only_fields = [
+            'id', 'account', 'symbol', 'total_value', 'profit_loss', 'profit_rate',
+            'created_at', 'updated_at'
+        ]
 
 
 class OrderSerializer(serializers.ModelSerializer):

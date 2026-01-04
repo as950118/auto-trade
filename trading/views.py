@@ -2,21 +2,48 @@ from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from drf_spectacular.utils import extend_schema, OpenApiResponse
 from django.db.models import Q
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from decimal import Decimal
-from .models import Order, Account, Symbol, Broker, Country, OrderStatus, DailyRealizedProfit
+from .models import Order, Account, Symbol, Broker, Country, OrderStatus, DailyRealizedProfit, Holding
 from .serializers import (
     OrderCreateSerializer, OrderSerializer, OrderUpdateSerializer,
     AccountSerializer, SymbolSerializer, DailyRealizedProfitSerializer,
-    UserSerializer
+    UserSerializer, BrokerSerializer, HoldingSerializer
 )
 from .profit_calculator import ProfitCalculator
 from datetime import date as date_type
 from .views_profit import DailyRealizedProfitViewSet
 
 
+@extend_schema(
+    summary='회원가입',
+    description='새로운 사용자를 등록합니다.',
+    request=UserSerializer,
+    responses={
+        201: OpenApiResponse(
+            description='회원가입 성공',
+            response={
+                'type': 'object',
+                'properties': {
+                    'message': {'type': 'string'},
+                    'user': {
+                        'type': 'object',
+                        'properties': {
+                            'id': {'type': 'integer'},
+                            'username': {'type': 'string'},
+                            'email': {'type': 'string'}
+                        }
+                    }
+                }
+            }
+        ),
+        400: OpenApiResponse(description='잘못된 요청')
+    },
+    tags=['인증']
+)
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def signup(request):
@@ -280,4 +307,96 @@ class SymbolViewSet(viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(is_delisted=False)
         
         serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+
+
+class BrokerViewSet(viewsets.ReadOnlyModelViewSet):
+    """브로커 ViewSet (조회만 가능)"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = BrokerSerializer
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['country', 'is_crypto_exchange']
+    search_fields = ['code', 'name']
+    ordering_fields = ['name', 'code', 'created_at']
+    ordering = ['name']
+    
+    def get_queryset(self):
+        """브로커 조회"""
+        queryset = Broker.objects.all()
+        
+        # 국가별 필터링
+        country = self.request.query_params.get('country', None)
+        if country:
+            queryset = queryset.filter(country=country)
+        
+        # 암호화폐 거래소만 조회
+        is_crypto = self.request.query_params.get('is_crypto', None)
+        if is_crypto is not None:
+            if is_crypto.lower() == 'true':
+                queryset = queryset.filter(is_crypto_exchange=True)
+            else:
+                queryset = queryset.filter(is_crypto_exchange=False)
+        
+        return queryset
+    
+    @action(detail=False, methods=['get'])
+    def crypto_exchanges(self, request):
+        """암호화폐 거래소만 조회"""
+        queryset = self.get_queryset().filter(is_crypto_exchange=True)
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def stock_brokers(self, request):
+        """증권사만 조회"""
+        queryset = self.get_queryset().filter(is_crypto_exchange=False)
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+
+
+class HoldingViewSet(viewsets.ReadOnlyModelViewSet):
+    """보유 종목 ViewSet (조회만 가능)"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = HoldingSerializer
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['account', 'symbol']
+    search_fields = ['symbol__ticker', 'symbol__name']
+    ordering_fields = ['total_value', 'profit_rate', 'updated_at']
+    ordering = ['-total_value']
+    
+    def get_queryset(self):
+        """현재 사용자의 보유 종목만 조회"""
+        queryset = Holding.objects.filter(account__user=self.request.user)
+        
+        # 계좌별 필터링
+        account_id = self.request.query_params.get('account_id', None)
+        if account_id:
+            queryset = queryset.filter(account_id=account_id)
+        
+        # 수량이 0보다 큰 것만 조회 (실제 보유 종목)
+        queryset = queryset.filter(quantity__gt=0)
+        
+        return queryset
+    
+    @action(detail=False, methods=['get'])
+    def by_account(self, request):
+        """계좌별 보유 종목 조회"""
+        account_id = request.query_params.get('account_id')
+        if not account_id:
+            return Response(
+                {"detail": "account_id 파라미터가 필요합니다."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # 계좌 소유권 확인
+        try:
+            account = Account.objects.get(id=account_id, user=request.user)
+        except Account.DoesNotExist:
+            return Response(
+                {"detail": "존재하지 않거나 권한이 없는 계좌입니다."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        holdings = self.get_queryset().filter(account=account)
+        serializer = self.get_serializer(holdings, many=True)
         return Response(serializer.data)

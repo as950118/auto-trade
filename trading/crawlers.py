@@ -71,16 +71,148 @@ class StockCrawler:
     def crawl_us_stocks() -> List[Dict]:
         """미국 주식 종목 크롤링"""
         try:
-            # 미국 주식 종목은 공개 API나 데이터베이스 사용
-            # 예: Alpha Vantage, Yahoo Finance 등
-            
             logger.info("미국 주식 종목 크롤링 시작")
             
-            # 실제 구현 필요
-            return []
+            stocks = []
+            
+            # 방법 1: FinanceDataReader 사용 (미국 주식 지원)
+            if FDR_AVAILABLE:
+                try:
+                    # NASDAQ 상장 종목
+                    nasdaq_list = fdr.StockListing('NASDAQ')
+                    if nasdaq_list is not None and not nasdaq_list.empty:
+                        for _, row in nasdaq_list.iterrows():
+                            ticker = str(row.get('Symbol', '')).strip()
+                            name = str(row.get('Name', '')).strip()
+                            
+                            if ticker and name:
+                                stocks.append({
+                                    'ticker': ticker,
+                                    'name': name,
+                                    'currency': Currency.USD
+                                })
+                        logger.info(f"NASDAQ 종목 {len(stocks)}개 수집 완료")
+                    
+                    # NYSE 상장 종목
+                    nyse_list = fdr.StockListing('NYSE')
+                    if nyse_list is not None and not nyse_list.empty:
+                        nyse_count = 0
+                        for _, row in nyse_list.iterrows():
+                            ticker = str(row.get('Symbol', '')).strip()
+                            name = str(row.get('Name', '')).strip()
+                            
+                            if ticker and name:
+                                # 중복 제거 (NASDAQ과 겹칠 수 있음)
+                                if not any(s['ticker'] == ticker for s in stocks):
+                                    stocks.append({
+                                        'ticker': ticker,
+                                        'name': name,
+                                        'currency': Currency.USD
+                                    })
+                                    nyse_count += 1
+                        logger.info(f"NYSE 종목 {nyse_count}개 추가 수집 완료")
+                    
+                except Exception as e:
+                    logger.error(f"FinanceDataReader로 미국 주식 크롤링 중 오류: {str(e)}")
+            
+            # 방법 2: Wikipedia를 통한 주요 지수 종목 수집 (FinanceDataReader 실패 시)
+            if not stocks:
+                try:
+                    import pandas as pd
+                    from io import StringIO
+                    
+                    # S&P 500 종목 목록
+                    sp500_url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+                    response = requests.get(sp500_url, timeout=10)
+                    if response.status_code == 200:
+                        # HTML 테이블 파싱
+                        tables = pd.read_html(StringIO(response.text))
+                        if tables:
+                            sp500_table = tables[0]
+                            for _, row in sp500_table.iterrows():
+                                ticker = str(row.get('Symbol', '')).strip()
+                                name = str(row.get('Security', '')).strip()
+                                
+                                if ticker and name:
+                                    stocks.append({
+                                        'ticker': ticker,
+                                        'name': name,
+                                        'currency': Currency.USD
+                                    })
+                            logger.info(f"S&P 500 종목 {len(stocks)}개 수집 완료")
+                    
+                    # NASDAQ-100 종목 목록
+                    nasdaq100_url = "https://en.wikipedia.org/wiki/NASDAQ-100"
+                    response = requests.get(nasdaq100_url, timeout=10)
+                    if response.status_code == 200:
+                        tables = pd.read_html(StringIO(response.text))
+                        if tables and len(tables) > 4:
+                            nasdaq100_table = tables[4]  # NASDAQ-100 테이블
+                            nasdaq100_count = 0
+                            for _, row in nasdaq100_table.iterrows():
+                                ticker = str(row.get('Ticker', '')).strip()
+                                name = str(row.get('Company', '')).strip()
+                                
+                                if ticker and name:
+                                    # 중복 제거
+                                    if not any(s['ticker'] == ticker for s in stocks):
+                                        stocks.append({
+                                            'ticker': ticker,
+                                            'name': name,
+                                            'currency': Currency.USD
+                                        })
+                                        nasdaq100_count += 1
+                            logger.info(f"NASDAQ-100 종목 {nasdaq100_count}개 추가 수집 완료")
+                    
+                except Exception as e:
+                    logger.error(f"Wikipedia를 통한 미국 주식 크롤링 중 오류: {str(e)}")
+            
+            if not stocks:
+                logger.warning("미국 주식 종목을 수집하지 못했습니다. FinanceDataReader 설치를 확인하세요.")
+            else:
+                logger.info(f"미국 주식 종목 총 {len(stocks)}개 수집 완료")
+            
+            return stocks
             
         except Exception as e:
             logger.error(f"미국 주식 종목 크롤링 실패: {str(e)}")
+            return []
+    
+    @staticmethod
+    def crawl_japan_stocks() -> List[Dict]:
+        """일본 주식 종목 크롤링"""
+        try:
+            logger.info("일본 주식 종목 크롤링 시작")
+            
+            stocks = []
+            
+            # FinanceDataReader 사용 (일본 주식 지원)
+            if FDR_AVAILABLE:
+                try:
+                    # 일본 주식 상장 종목
+                    japan_list = fdr.StockListing('JPX')
+                    if japan_list is not None and not japan_list.empty:
+                        for _, row in japan_list.iterrows():
+                            ticker = str(row.get('Symbol', '')).strip()
+                            name = str(row.get('Name', '')).strip()
+                            
+                            if ticker and name:
+                                stocks.append({
+                                    'ticker': ticker,
+                                    'name': name,
+                                    'currency': Currency.USD  # 일본 주식은 JPY이지만 시스템에서는 USD로 처리 (필요시 JPY 추가 가능)
+                                })
+                        logger.info(f"일본 주식 종목 {len(stocks)}개 수집 완료")
+                except Exception as e:
+                    logger.error(f"FinanceDataReader로 일본 주식 크롤링 중 오류: {str(e)}")
+            
+            if not stocks:
+                logger.warning("일본 주식 종목을 수집하지 못했습니다. FinanceDataReader 설치를 확인하세요.")
+            
+            return stocks
+            
+        except Exception as e:
+            logger.error(f"일본 주식 종목 크롤링 실패: {str(e)}")
             return []
     
     @staticmethod
@@ -268,6 +400,10 @@ def crawl_all_symbols():
                 total_stocks += len(stocks)
             elif broker.country == Country.USA:
                 stocks = StockCrawler.crawl_us_stocks()
+                StockCrawler.update_stocks(broker, stocks)
+                total_stocks += len(stocks)
+            elif broker.country == Country.JAPAN:
+                stocks = StockCrawler.crawl_japan_stocks()
                 StockCrawler.update_stocks(broker, stocks)
                 total_stocks += len(stocks)
         
