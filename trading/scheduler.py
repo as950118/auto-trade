@@ -56,6 +56,16 @@ def start_scheduler():
         replace_existing=True,
     )
     
+    # 암호화폐 시세 업데이트 작업 등록 (1분마다 실행)
+    crypto_price_interval = getattr(settings, 'CRYPTO_PRICE_UPDATE_INTERVAL_MINUTES', 1)
+    scheduler.add_job(
+        update_crypto_prices_job,
+        trigger=IntervalTrigger(minutes=crypto_price_interval),
+        id='update_crypto_prices',
+        name='암호화폐 시세 업데이트',
+        replace_existing=True,
+    )
+    
     register_events(scheduler)
     
     try:
@@ -199,4 +209,24 @@ def calculate_daily_profit_job():
             f"❌ 일일 실현 손익 계산 실패\n\n오류: {str(e)}",
             job_name="일일 실현 손익 계산"
         )
+
+
+def update_crypto_prices_job():
+    """암호화폐 시세 업데이트 작업 (스케줄러에서 호출)"""
+    from .tasks import update_crypto_prices
+    from .notifications import notify_scheduler
+    
+    try:
+        updated_count = update_crypto_prices()
+        
+        # 업데이트된 종목이 있는 경우에만 알림 (너무 자주 알림이 오지 않도록)
+        if updated_count > 0:
+            message = f"✅ 암호화폐 시세 업데이트 완료\n\n"
+            message += f"업데이트된 종목: {updated_count}개"
+            # 알림은 생략 (너무 자주 실행되므로)
+            logger.info(message)
+    except Exception as e:
+        error_msg = f"암호화폐 시세 업데이트 작업 실행 중 오류: {str(e)}"
+        logger.error(error_msg)
+        # 에러 알림도 생략 (너무 자주 실행되므로)
 

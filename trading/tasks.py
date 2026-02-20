@@ -210,24 +210,17 @@ def update_account_info(account: Account):
                 account.stock_value_usd = result.get('stock_value_usd', Decimal('0'))
                 account.total_assets_usd = result.get('total_assets_usd', Decimal('0'))
                 
-                # 수익률 계산 (초기 투자 대비, 간단히 처리)
-                # 실제로는 초기 투자 금액을 별도로 저장해야 정확한 수익률 계산 가능
-                # total_assets는 property이므로 직접 사용 가능
-                if account.total_assets > 0:
-                    # 임시로 이전 총 자산과 비교 (더 정확한 계산은 별도 필드 필요)
-                    previous_total = account.total_assets
-                    # 여기서는 간단히 처리, 실제로는 초기 투자 금액 필드가 필요
-                    account.profit_rate = Decimal('0')  # 수익률 계산 로직 추가 필요
-                
                 account.save(update_fields=[
-                    'profit_rate',
                     'cash_balance_krw', 'stock_value_krw', 'total_assets_krw',
                     'cash_balance_usd', 'stock_value_usd', 'total_assets_usd'
                 ])
                 
-                # 보유 종목 정보 업데이트
+                # 보유 종목 정보 업데이트 (내부에서 계좌 수익률도 계산됨)
                 holdings_data = result.get('holdings', [])
                 update_holdings(account, holdings_data)
+                
+                # 보유 종목 업데이트 후 실제 DB의 보유 종목 총액으로 계좌 자산 정보 재계산
+                _recalculate_account_assets(account)
             
             logger.info(f"계좌 정보 업데이트 성공 (Account ID: {account.id}, 총 자산: {account.total_assets})")
         else:
@@ -246,6 +239,13 @@ def update_account_info(account: Account):
 def update_holdings(account: Account, holdings_data: list):
     """보유 종목 정보 업데이트"""
     logger.info(f"보유 종목 업데이트 시작: {len(holdings_data)}개 종목 데이터")
+    
+    # 브로커 클라이언트 가져오기 (암호화폐 시세 조회용)
+    client = None
+    try:
+        client = get_broker_client(account)
+    except Exception as e:
+        logger.warning(f"브로커 클라이언트 생성 실패 (시세 조회 불가): {str(e)}")
     
     # 현재 보유 종목의 티커 집합
     current_tickers = set()
@@ -295,13 +295,19 @@ def update_holdings(account: Account, holdings_data: list):
         if quantity > 0:
             current_tickers.add(ticker)
             
+            # 암호화폐인 경우 현재가가 0이면 API로 조회
+            if account.broker.is_crypto_exchange and current_price == 0 and client:
+                try:
+                    api_price = client.get_crypto_price(ticker)
+                    if api_price and api_price > 0:
+                        current_price = api_price
+                        logger.debug(f"API로 현재가 조회 성공: {ticker} = {current_price}")
+                except Exception as e:
+                    logger.warning(f"현재가 조회 실패 ({ticker}): {str(e)}")
+            
             # Holding 업데이트 또는 생성
-            # 해외 종목의 경우 current_price가 0일 수 있으므로 average_price를 사용
-            if current_price == 0 and average_price > 0:
-                # 현재가가 없으면 평균 매수가를 현재가로 사용
-                effective_current_price = average_price
-            else:
-                effective_current_price = current_price
+            # 해외 종목의 경우 current_price가 0일 수 있음
+            # save() 메서드에서 current_price가 0이면 average_price를 사용하여 수익률 계산
             
             # 평균 매수가가 없으면 현재가를 사용
             if average_price == 0 and current_price > 0:
@@ -311,22 +317,29 @@ def update_holdings(account: Account, holdings_data: list):
             
             # total_value가 0이면 계산
             if total_value == 0 and quantity > 0:
-                if effective_current_price > 0:
-                    total_value = quantity * effective_current_price
-                elif effective_average_price > 0:
-                    total_value = quantity * effective_average_price
+                # current_price가 있으면 사용, 없으면 average_price 사용
+                price_for_value = current_price if current_price > 0 else effective_average_price
+                if price_for_value > 0:
+                    total_value = quantity * price_for_value
             
+            # current_price는 실제 값이 있으면 저장, 없으면 0으로 저장
+            # save() 메서드에서 current_price가 0이면 average_price를 사용하여 수익률 계산
             holding, created = Holding.objects.update_or_create(
                 account=account,
                 symbol=symbol,
                 defaults={
                     'quantity': quantity,
-                    'current_price': effective_current_price,  # 0이 아닌 값으로 저장
+                    'current_price': current_price,  # 실제 현재가 (0일 수 있음)
                     'average_price': effective_average_price,
                     'total_value': total_value,
                     # profit_loss와 profit_rate는 save()에서 자동 계산됨
+                    # save()에서 current_price가 0이면 average_price를 사용하여 수익률 계산
                 }
             )
+            
+            # update_or_create 후 명시적으로 save()를 호출하여 profit_loss와 profit_rate 계산
+            # (update_or_create의 defaults에 없는 필드는 업데이트되지 않을 수 있음)
+            holding.save()
             
             if created:
                 logger.info(f"보유 종목 생성: {account.id} - {ticker} ({currency}, {quantity}주)")
@@ -340,5 +353,169 @@ def update_holdings(account: Account, holdings_data: list):
     if deleted_count > 0:
         logger.info(f"보유하지 않는 종목 {deleted_count}개 삭제 완료")
     
+    # 계좌의 수익률 계산 및 업데이트
+    _update_account_profit_rate(account)
+    
     logger.info(f"보유 종목 업데이트 완료: {len(current_tickers)}개 종목 (국내+해외)")
+
+
+def _recalculate_account_assets(account: Account):
+    """보유 종목의 실제 total_value 합계로 계좌 자산 정보 재계산"""
+    from .models import Holding
+    
+    # 보유 종목들의 실제 total_value 합계 계산
+    holdings = Holding.objects.filter(account=account, quantity__gt=0)
+    
+    stock_value_krw = Decimal('0')
+    stock_value_usd = Decimal('0')
+    
+    for holding in holdings:
+        if holding.symbol.currency == 'KRW':
+            stock_value_krw += holding.total_value
+        elif holding.symbol.currency == 'USD':
+            stock_value_usd += holding.total_value
+        elif holding.symbol.currency == 'USDT':
+            # USDT는 USD로 처리
+            stock_value_usd += holding.total_value
+    
+    # 계좌 자산 정보 업데이트 (예수금은 유지, 보유종목가치만 재계산)
+    account.stock_value_krw = stock_value_krw
+    account.stock_value_usd = stock_value_usd
+    account.total_assets_krw = account.cash_balance_krw + stock_value_krw
+    account.total_assets_usd = account.cash_balance_usd + stock_value_usd
+    
+    account.save(update_fields=[
+        'stock_value_krw', 'stock_value_usd',
+        'total_assets_krw', 'total_assets_usd'
+    ])
+    
+    logger.debug(f"계좌 자산 재계산: {account.id} - 보유종목가치 (KRW: {stock_value_krw:,.0f}원, USD: ${stock_value_usd:,.2f})")
+
+
+def _update_account_profit_rate(account: Account):
+    """계좌의 수익률 계산 및 업데이트"""
+    from .models import Holding
+    
+    # 보유 종목들의 평가 손익과 매수 금액 합계 계산
+    holdings = Holding.objects.filter(account=account, quantity__gt=0)
+    
+    # 통화별로 구분하여 계산
+    profit_loss_krw = Decimal('0')
+    cost_krw = Decimal('0')
+    profit_loss_usd = Decimal('0')
+    cost_usd = Decimal('0')
+    
+    for holding in holdings:
+        if holding.average_price > 0:
+            cost = holding.quantity * holding.average_price
+            
+            if holding.symbol.currency == 'KRW':
+                # 원화 종목
+                profit_loss_krw += holding.profit_loss
+                cost_krw += cost
+            elif holding.symbol.currency == 'USD':
+                # 달러 종목
+                profit_loss_usd += holding.profit_loss
+                cost_usd += cost
+            else:
+                # 기타 통화 (USDT 등) - 원화로 간주하거나 별도 처리
+                # 일단 원화로 처리
+                profit_loss_krw += holding.profit_loss
+                cost_krw += cost
+    
+    # 환율 적용하여 통합 계산 (USD를 원화로 변환)
+    # 실제 환율을 가져오거나, 계좌 정보에서 환율 추정
+    # 해외 주식의 경우 KisClient에서 환율 정보를 가져올 수 있음
+    # 일단 기본 환율 사용 (나중에 API에서 가져오도록 개선 가능)
+    exchange_rate = Decimal('1300')  # 기본 환율
+    
+    # 계좌에 해외 주식이 있고 환율 정보가 있으면 사용
+    # (KisClient에서 가져온 환율 정보 활용 가능)
+    if cost_usd > 0:
+        # 해외 주식이 있는 경우, 실제 환율을 사용하거나 기본값 사용
+        # TODO: 실제 환율 API 연동 또는 Holding에서 환율 정보 가져오기
+        pass
+    
+    # USD를 원화로 변환하여 통합
+    total_profit_loss = profit_loss_krw + (profit_loss_usd * exchange_rate)
+    total_cost = cost_krw + (cost_usd * exchange_rate)
+    
+    # 수익률 계산
+    if total_cost > 0:
+        account.profit_rate = (total_profit_loss / total_cost) * 100
+    else:
+        account.profit_rate = Decimal('0')
+    
+    account.save(update_fields=['profit_rate'])
+    logger.debug(f"계좌 수익률 업데이트: {account.id} - 수익률: {account.profit_rate}% (평가손익: {total_profit_loss:,.0f}원, 매수금액: {total_cost:,.0f}원)")
+
+
+def update_crypto_prices():
+    """암호화폐 보유 종목의 현재가 업데이트"""
+    from .models import Holding, Symbol, Account
+    from .clients import get_broker_client
+    
+    logger.info("암호화폐 시세 업데이트 시작")
+    
+    # 암호화폐 보유 종목만 조회
+    crypto_holdings = Holding.objects.filter(
+        symbol__is_crypto=True,
+        quantity__gt=0
+    ).select_related('account', 'symbol', 'account__broker')
+    
+    updated_count = 0
+    failed_count = 0
+    
+    # 계좌별로 그룹화하여 클라이언트 재사용
+    accounts_dict = {}
+    for holding in crypto_holdings:
+        account_id = holding.account.id
+        if account_id not in accounts_dict:
+            accounts_dict[account_id] = {
+                'account': holding.account,
+                'holdings': []
+            }
+        accounts_dict[account_id]['holdings'].append(holding)
+    
+    for account_id, data in accounts_dict.items():
+        account = data['account']
+        holdings = data['holdings']
+        
+        # 브로커 클라이언트 가져오기
+        try:
+            client = get_broker_client(account)
+        except Exception as e:
+            logger.warning(f"브로커 클라이언트 생성 실패 (Account ID: {account_id}): {str(e)}")
+            failed_count += len(holdings)
+            continue
+        
+        # 각 보유 종목의 현재가 업데이트
+        for holding in holdings:
+            try:
+                ticker = holding.symbol.ticker
+                
+                # 현재가 조회
+                current_price = client.get_crypto_price(ticker)
+                
+                if current_price and current_price > 0:
+                    # 현재가 업데이트
+                    holding.current_price = current_price
+                    
+                    # 총 가치 재계산
+                    if holding.quantity > 0:
+                        holding.total_value = holding.quantity * current_price
+                    
+                    # save()에서 profit_loss와 profit_rate 자동 계산됨
+                    holding.save(update_fields=['current_price', 'total_value'])
+                    updated_count += 1
+                    logger.debug(f"시세 업데이트: {ticker} = {current_price}")
+                else:
+                    logger.warning(f"현재가 조회 실패 또는 0: {ticker}")
+                    failed_count += 1
+            except Exception as e:
+                logger.warning(f"시세 업데이트 실패 ({holding.symbol.ticker}): {str(e)}")
+                failed_count += 1
+    
+    logger.info(f"암호화폐 시세 업데이트 완료: 성공 {updated_count}개, 실패 {failed_count}개")
+    return updated_count
 
