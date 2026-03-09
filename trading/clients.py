@@ -51,6 +51,17 @@ class BaseBrokerClient:
             }
         """
         raise NotImplementedError
+    
+    def get_crypto_price(self, ticker: str) -> Optional[Decimal]:
+        """
+        암호화폐 현재가 조회
+        Args:
+            ticker: 티커 (예: "BTC-KRW", "BTC-USDT")
+        Returns:
+            현재가 (Decimal) 또는 None
+        """
+        # 기본 구현은 None 반환 (각 클라이언트에서 구현)
+        return None
 
 
 class UpbitClient(BaseBrokerClient):
@@ -345,19 +356,34 @@ class BingXClient(BaseBrokerClient):
                     else:
                         # 암호화폐는 보유 종목으로 처리
                         # BingX는 USDT 기준 거래이므로 USDT 가치로 계산
-                        # 간단히 1:1로 처리하거나, 실제 시세 API를 호출해야 함
-                        # 여기서는 간단히 수량만 저장하고 가치는 0으로 설정
+                        ticker = f"{asset}-USDT"
+                        
+                        # 현재가 조회
+                        current_price = Decimal('0')
+                        try:
+                            api_price = self.get_crypto_price(ticker)
+                            if api_price and api_price > 0:
+                                current_price = api_price
+                        except Exception as e:
+                            logger.warning(f"BingX 현재가 조회 실패 ({ticker}): {str(e)}")
+                        
+                        # 총 가치 계산
+                        if current_price > 0:
+                            total_value = total_amount * current_price
+                            stock_value += total_value
+                        else:
+                            total_value = Decimal('0')
+                            # 현재가 조회 실패 시 나중에 update_holdings에서 조회
+                        
                         holdings.append({
-                            'ticker': f"{asset}-USDT",
+                            'ticker': ticker,
                             'name': balance.get('disPlayName', asset),  # disPlayName 사용
                             'quantity': total_amount,
-                            'current_price': Decimal('0'),  # 실제 시세 조회 필요
-                            'average_price': Decimal('0'),
-                            'total_value': Decimal('0'),  # 실제 시세 조회 필요
+                            'current_price': current_price,
+                            'average_price': Decimal('0'),  # BingX는 평균 매수가 정보를 제공하지 않음
+                            'total_value': total_value,
                             'currency': 'USDT',
                         })
-                        # 임시로 수량만 저장 (실제 가치는 시세 조회 필요)
-                        stock_value += Decimal('0')
             
             # 통화별 자산 계산 (BingX는 USDT 기준)
             total_assets_krw = Decimal('0')  # BingX는 원화 거래 없음
@@ -470,6 +496,28 @@ class BingXClient(BaseBrokerClient):
                 'success': False,
                 'error': str(e)
             }
+    
+    def get_crypto_price(self, ticker: str) -> Optional[Decimal]:
+        """BingX 암호화폐 현재가 조회"""
+        try:
+            # BingX 심볼 형식 변환 (BTC-USDT 형식)
+            if '-' not in ticker:
+                # 티커만 있는 경우 USDT 페어로 변환
+                ticker = f"{ticker}-USDT"
+            
+            # BingX 시세 조회 API: /openApi/spot/v1/ticker/price
+            params = {'symbol': ticker}
+            result = self._make_request('GET', '/openApi/spot/v1/ticker/price', params=params)
+            
+            if result.get('success'):
+                data = result.get('data', {})
+                price = data.get('price')
+                if price:
+                    return Decimal(str(price))
+            return None
+        except Exception as e:
+            logger.warning(f"BingX 현재가 조회 실패 ({ticker}): {str(e)}")
+            return None
     
 class KisClient(BaseBrokerClient):
     """한국투자증권 Open API 클라이언트 (실전투자)"""

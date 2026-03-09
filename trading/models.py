@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.db import models
 from django.contrib.auth.models import User
 from django.core.validators import MinValueValidator
@@ -501,12 +503,12 @@ class Holding(models.Model):
         if self.quantity > 0 and self.average_price > 0:
             cost = self.quantity * self.average_price
             
-            # 현재가가 있으면 현재가 기준, 없으면 평균 매수가 기준
-            if self.current_price > 0:
-                value = self.quantity * self.current_price
-            else:
-                # 현재가가 없으면 평균 매수가를 현재가로 사용
-                value = cost
+            # 현재가 결정: current_price가 있으면 사용, 없으면 average_price 사용
+            # 해외종목의 경우 current_price가 0일 수 있으므로 average_price를 fallback으로 사용
+            effective_current_price = self.current_price if self.current_price > 0 else self.average_price
+            
+            # 현재가 기준 가치 계산
+            value = self.quantity * effective_current_price
             
             # 평가 손익 계산
             self.profit_loss = value - cost
@@ -517,7 +519,7 @@ class Holding(models.Model):
             else:
                 self.profit_rate = Decimal('0')
         else:
-            # 수량이 0이면 초기화
+            # 수량이 0이거나 평균 매수가가 없으면 초기화
             self.profit_loss = Decimal('0')
             self.profit_rate = Decimal('0')
         

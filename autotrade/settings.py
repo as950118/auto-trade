@@ -241,3 +241,9 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# 계좌 정보 업데이트 간격 (분)
+ACCOUNT_UPDATE_INTERVAL_MINUTES = 1
+
+# 암호화폐 시세 업데이트 간격 (분)
+CRYPTO_PRICE_UPDATE_INTERVAL_MINUTES = 1
