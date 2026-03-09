@@ -1,7 +1,12 @@
+from urllib.parse import urlencode
+import requests
+from django.conf import settings
+from django.contrib.auth.models import User
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework_simplejwt.tokens import RefreshToken
 from drf_spectacular.utils import extend_schema, OpenApiResponse
 from django.db.models import Q
 from django.utils import timezone
@@ -63,6 +68,117 @@ def signup(request):
             status=status.HTTP_201_CREATED
         )
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@extend_schema(
+    summary='Google OAuth2 로그인 URL',
+    description='Google OAuth2 인증 페이지로 리다이렉트할 URL을 반환합니다.',
+    responses={200: {'description': 'auth_url 포함'}, 503: {'description': 'Google OAuth2 미설정'}},
+    tags=['인증']
+)
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def google_oauth2_login(request):
+    """Google OAuth2 로그인 URL 반환"""
+    client_id = getattr(settings, 'GOOGLE_OAUTH2_CLIENT_ID', '') or ''
+    if not client_id:
+        return Response(
+            {'detail': 'Google OAuth2가 설정되지 않았습니다. GOOGLE_OAUTH2_CLIENT_ID를 설정해 주세요.'},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE
+        )
+    frontend_url = (getattr(settings, 'FRONTEND_URL', '') or '').rstrip('/')
+    redirect_uri = f'{frontend_url}/oauth2/google'
+    scope = 'openid email profile'
+    params = {
+        'client_id': client_id,
+        'redirect_uri': redirect_uri,
+        'response_type': 'code',
+        'scope': scope,
+    }
+    auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
+    return Response({'auth_url': auth_url})
+
+
+@extend_schema(
+    summary='Google OAuth2 콜백',
+    description='Google에서 받은 인증 코드로 토큰을 교환하고 JWT를 반환합니다.',
+    request={'type': 'object', 'properties': {'code': {'type': 'string'}}, 'required': ['code']},
+    responses={
+        200: OpenApiResponse(description='access, refresh, user 반환'),
+        400: OpenApiResponse(description='code 누락 또는 교환 실패'),
+        503: OpenApiResponse(description='Google OAuth2 미설정'),
+    },
+    tags=['인증']
+)
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def google_oauth2_callback(request):
+    """Google OAuth2 코드를 JWT로 교환"""
+    client_id = getattr(settings, 'GOOGLE_OAUTH2_CLIENT_ID', '') or ''
+    client_secret = getattr(settings, 'GOOGLE_OAUTH2_CLIENT_SECRET', '') or ''
+    if not client_id or not client_secret:
+        return Response(
+            {'detail': 'Google OAuth2가 설정되지 않았습니다.'},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE
+        )
+    code = (request.data.get('code') or request.query_params.get('code') or '').strip()
+    if not code:
+        return Response({'detail': '인증 코드(code)가 필요합니다.'}, status=status.HTTP_400_BAD_REQUEST)
+    frontend_url = (getattr(settings, 'FRONTEND_URL', '') or '').rstrip('/')
+    redirect_uri = f'{frontend_url}/oauth2/google'
+    token_response = requests.post(
+        'https://oauth2.googleapis.com/token',
+        data={
+            'code': code,
+            'client_id': client_id,
+            'client_secret': client_secret,
+            'redirect_uri': redirect_uri,
+            'grant_type': 'authorization_code',
+        },
+        headers={'Content-Type': 'application/x-www-form-urlencoded'},
+        timeout=10,
+    )
+    if token_response.status_code != 200:
+        return Response(
+            {'detail': 'Google 토큰 교환에 실패했습니다.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    access_token = token_response.json().get('access_token')
+    if not access_token:
+        return Response(
+            {'detail': 'Google에서 access_token을 받지 못했습니다.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    user_response = requests.get(
+        'https://www.googleapis.com/oauth2/v2/userinfo',
+        headers={'Authorization': f'Bearer {access_token}'},
+        timeout=10,
+    )
+    if user_response.status_code != 200:
+        return Response(
+            {'detail': 'Google 사용자 정보를 가져오지 못했습니다.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    user_info = user_response.json()
+    email = (user_info.get('email') or '').strip()
+    if not email:
+        return Response(
+            {'detail': 'Google 계정에서 이메일을 가져올 수 없습니다.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    user, created = User.objects.get_or_create(
+        username=email,
+        defaults={'email': email}
+    )
+    if created:
+        user.set_unusable_password()
+        user.save()
+    refresh = RefreshToken.for_user(user)
+    return Response({
+        'access': str(refresh.access_token),
+        'refresh': str(refresh),
+        'user': {'username': user.username},
+    })
 
 
 class AccountViewSet(viewsets.ModelViewSet):
@@ -264,6 +380,11 @@ class SymbolViewSet(viewsets.ReadOnlyModelViewSet):
                 queryset = queryset.filter(is_crypto=True)
             else:
                 queryset = queryset.filter(is_crypto=False)
+        
+        # 브로커별 필터링 (매수 시 계좌 선택 후 해당 브로커 종목만 조회)
+        broker_id = self.request.query_params.get('broker_id', None)
+        if broker_id:
+            queryset = queryset.filter(broker_id=broker_id)
         
         # 상장폐지 여부 필터링 (기본값: 상장폐지되지 않은 종목만)
         include_delisted = self.request.query_params.get('include_delisted', 'false')

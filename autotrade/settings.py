@@ -11,10 +11,13 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
 from pathlib import Path
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
-
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/4.2/howto/deployment/checklist/
@@ -25,7 +28,7 @@ SECRET_KEY = 'django-insecure-1(fgzri4ri21-3df_gp1hl1is51^vv3c_t)aoqbzrue#d%#5ki
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1']
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', '*']
 
 
 # Application definition
@@ -44,6 +47,7 @@ INSTALLED_APPS = [
     'django_filters',
     'django_apscheduler',
     'trading',
+    'django_extensions',
 ]
 
 # DRF 설정
@@ -81,6 +85,12 @@ SIMPLE_JWT = {
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
 }
+
+# Google OAuth2 (optional; set in .env to enable Google login)
+GOOGLE_OAUTH2_CLIENT_ID = os.getenv('GOOGLE_OAUTH2_CLIENT_ID', '')
+GOOGLE_OAUTH2_CLIENT_SECRET = os.getenv('GOOGLE_OAUTH2_CLIENT_SECRET', '')
+# Frontend URL where Google redirects with ?code= (e.g. http://localhost:3000 or https://your-app.vercel.app)
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')
 
 # 스케줄러 설정
 SCHEDULER_CONFIG = {
@@ -130,7 +140,7 @@ else:
     CORS_ALLOWED_ORIGINS = [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
-        "https://your-production-domain.com",  # 프로덕션 도메인으로 변경
+        "https://auto-trade-view.vercel.app",  # 프로덕션 도메인으로 변경
     ]
 
 CORS_ALLOW_CREDENTIALS = True
@@ -181,12 +191,15 @@ WSGI_APPLICATION = 'autotrade.wsgi.application'
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
 
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+    "default": {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": "postgres",
+        "USER": os.getenv('DB_USER'),
+        "PASSWORD": os.getenv('DB_PASSWORD'),
+        "HOST": os.getenv('DB_HOST'),
+        "PORT": os.getenv('DB_PORT'),
     }
 }
-
 
 # Password validation
 # https://docs.djangoproject.com/en/4.2/ref/settings/#auth-password-validators

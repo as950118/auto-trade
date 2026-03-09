@@ -1,7 +1,17 @@
 from rest_framework import serializers
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from .models import Order, Account, Symbol, Broker, DailyRealizedProfit, Holding
+from .sell_quantity import (
+    resolve_sell_quantity,
+    QUANTITY_TYPE_EXACT,
+    QUANTITY_TYPE_MAX,
+    QUANTITY_TYPE_PERCENT,
+    QUANTITY_TYPE_AMOUNT,
+    QUANTITY_TYPES,
+)
+from .buy_quantity import resolve_buy_quantity
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -140,15 +150,51 @@ class DailyRealizedProfitSerializer(serializers.ModelSerializer):
 
 
 class OrderCreateSerializer(serializers.ModelSerializer):
-    """주문 생성용 시리얼라이저"""
+    """
+    주문 생성용 시리얼라이저.
+    - 매수/매도 공통: quantity(직접 수량) 또는 quantity_type + quantity_value
+    - quantity_type: EXACT(직접 수량), MAX(전량/예수금 전액), PERCENT(비율%), AMOUNT(금액)
+    - order_type: MARKET(시장가), LIMIT(지정가, price 필수)
+    - 매수 시 전량/비율/금액 사용 시: 지정가면 price가 기준가, 시장가면 price는 수량 계산용 예상가(reference)
+    """
     account_id = serializers.IntegerField(write_only=True)
     symbol_id = serializers.IntegerField(write_only=True)
-    
+    quantity = serializers.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        min_value=0,
+        required=False,
+        allow_null=True,
+        help_text='수량. 매도에서 quantity_type 사용 시 생략 가능.'
+    )
+    quantity_type = serializers.ChoiceField(
+        choices=QUANTITY_TYPES,
+        required=False,
+        allow_blank=True,
+        help_text='수량 지정 방식: EXACT(직접 수량), MAX(전량/예수금 전액), PERCENT(10/50 등), AMOUNT(금액)'
+    )
+    quantity_value = serializers.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        min_value=0,
+        required=False,
+        allow_null=True,
+        help_text='PERCENT일 때 비율(10, 50 등), AMOUNT일 때 금액(KRW/USD 등)'
+    )
+    price = serializers.DecimalField(
+        max_digits=20,
+        decimal_places=2,
+        min_value=0,
+        required=False,
+        allow_null=True,
+        help_text='지정가(LIMIT) 시 필수. 시장가(MARKET) 매수에서 전량/비율/금액 사용 시 수량 계산용 예상가.'
+    )
+
     class Meta:
         model = Order
         fields = [
-            'account_id', 'symbol_id', 'side', 'order_type', 
-            'quantity', 'price'
+            'account_id', 'symbol_id', 'side', 'order_type',
+            'quantity', 'quantity_type', 'quantity_value', 'price'
         ]
     
     def validate(self, attrs):
@@ -157,6 +203,10 @@ class OrderCreateSerializer(serializers.ModelSerializer):
         symbol_id = attrs.get('symbol_id')
         order_type = attrs.get('order_type')
         price = attrs.get('price')
+        side = attrs.get('side')
+        quantity = attrs.get('quantity')
+        quantity_type = (attrs.get('quantity_type') or '').strip() or None
+        quantity_value = attrs.get('quantity_value')
         
         # 계좌 존재 확인
         try:
@@ -175,11 +225,92 @@ class OrderCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("지정가 주문은 가격이 필수입니다.")
         
         # 매수/매도 동작 여부 확인
-        side = attrs.get('side')
         if side == 'BUY' and not account.buy_enabled:
             raise serializers.ValidationError("매수 동작이 비활성화된 계좌입니다.")
         if side == 'SELL' and not account.sell_enabled:
             raise serializers.ValidationError("매도 동작이 비활성화된 계좌입니다.")
+        
+        # 매도 시 수량 해석: quantity_type 사용 시 resolve_sell_quantity 호출
+        if side == 'SELL' and quantity_type:
+            if quantity_type == QUANTITY_TYPE_PERCENT and quantity_value is None:
+                raise serializers.ValidationError({
+                    'quantity_value': '비율(%) 지정 시 quantity_value(예: 10, 50)가 필요합니다.'
+                })
+            if quantity_type == QUANTITY_TYPE_AMOUNT and quantity_value is None:
+                raise serializers.ValidationError({
+                    'quantity_value': '금액 지정 시 quantity_value(금액)가 필요합니다.'
+                })
+            value_for_resolve = quantity_value
+            if quantity_type == QUANTITY_TYPE_EXACT and value_for_resolve is None and quantity is not None:
+                value_for_resolve = quantity
+            if quantity_type == QUANTITY_TYPE_EXACT and value_for_resolve is None:
+                raise serializers.ValidationError({
+                    'quantity': '직접 수량(EXACT) 지정 시 quantity 또는 quantity_value가 필요합니다.'
+                })
+            try:
+                resolved = resolve_sell_quantity(
+                    account=account,
+                    symbol=symbol,
+                    quantity_type=quantity_type,
+                    quantity_value=float(value_for_resolve) if value_for_resolve is not None else None,
+                    order_type=order_type,
+                    limit_price=Decimal(str(price)) if price else None,
+                )
+                attrs['quantity'] = resolved
+            except DjangoValidationError as e:
+                msg = getattr(e, 'messages', None)
+                if msg and isinstance(msg, list) and msg:
+                    raise serializers.ValidationError(msg[0] if len(msg) == 1 else msg)
+                raise serializers.ValidationError(str(e))
+            # API 응답용이 아닌 주문 생성용이므로 quantity_type/value 제거는 create에서
+        elif side == 'SELL' and not quantity_type and (quantity is None or quantity <= 0):
+            raise serializers.ValidationError({
+                'quantity': '매도 시 수량(quantity) 또는 quantity_type을 지정해 주세요.'
+            })
+        # 매수 시 수량 해석: quantity_type 사용 시 resolve_buy_quantity 호출
+        elif side == 'BUY' and quantity_type:
+            if quantity_type == QUANTITY_TYPE_PERCENT and quantity_value is None:
+                raise serializers.ValidationError({
+                    'quantity_value': '비율(%) 지정 시 quantity_value(예: 10, 50)가 필요합니다.'
+                })
+            if quantity_type == QUANTITY_TYPE_AMOUNT and quantity_value is None:
+                raise serializers.ValidationError({
+                    'quantity_value': '금액 지정 시 quantity_value(금액)가 필요합니다.'
+                })
+            value_for_resolve = quantity_value
+            if quantity_type == QUANTITY_TYPE_EXACT and value_for_resolve is None and quantity is not None:
+                value_for_resolve = quantity
+            if quantity_type == QUANTITY_TYPE_EXACT and value_for_resolve is None:
+                raise serializers.ValidationError({
+                    'quantity': '직접 수량(EXACT) 지정 시 quantity 또는 quantity_value가 필요합니다.'
+                })
+            # 시장가 + 전량/비율/금액 이면 수량 계산을 위해 기준가(price) 필요
+            if order_type == 'MARKET' and quantity_type in (QUANTITY_TYPE_MAX, QUANTITY_TYPE_PERCENT, QUANTITY_TYPE_AMOUNT):
+                if not price or price <= 0:
+                    raise serializers.ValidationError({
+                        'price': '시장가 매수에서 전량/비율/금액 지정 시 수량 계산을 위한 예상가(price)가 필요합니다.'
+                    })
+            try:
+                resolved = resolve_buy_quantity(
+                    account=account,
+                    symbol=symbol,
+                    quantity_type=quantity_type,
+                    quantity_value=float(value_for_resolve) if value_for_resolve is not None else None,
+                    order_type=order_type,
+                    limit_price=Decimal(str(price)) if (order_type == 'LIMIT' and price) else None,
+                    reference_price=Decimal(str(price)) if (order_type == 'MARKET' and price) else None,
+                )
+                attrs['quantity'] = resolved
+                # 시장가 매수에서 price는 수량 계산용만 사용; DB에는 저장하지 않음(지정가만 price 저장)
+                if order_type == 'MARKET' and quantity_type in (QUANTITY_TYPE_MAX, QUANTITY_TYPE_PERCENT, QUANTITY_TYPE_AMOUNT):
+                    attrs['price'] = None
+            except DjangoValidationError as e:
+                msg = getattr(e, 'messages', None)
+                if msg and isinstance(msg, list) and msg:
+                    raise serializers.ValidationError(msg[0] if len(msg) == 1 else msg)
+                raise serializers.ValidationError(str(e))
+        elif side == 'BUY' and (quantity is None or quantity <= 0):
+            raise serializers.ValidationError({'quantity': '매수 수량(quantity) 또는 quantity_type을 지정해 주세요.'})
         
         return attrs
     
@@ -187,7 +318,8 @@ class OrderCreateSerializer(serializers.ModelSerializer):
         """주문 생성"""
         account_id = validated_data.pop('account_id')
         symbol_id = validated_data.pop('symbol_id')
-        
+        validated_data.pop('quantity_type', None)
+        validated_data.pop('quantity_value', None)
         account = Account.objects.get(id=account_id)
         symbol = Symbol.objects.get(id=symbol_id)
         
