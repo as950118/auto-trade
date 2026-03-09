@@ -19,7 +19,11 @@ urlpatterns = [
     # JWT 인증
     path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
-    
+        
+    # Google OAuth2
+    path('api/oauth2/google/login/', google_oauth2_login),
+    path('api/oauth2/google/callback/', google_oauth2_callback),
+
     # API 라우터
     path('api/', include(router.urls)),
 ]
