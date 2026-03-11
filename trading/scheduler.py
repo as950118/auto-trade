@@ -75,6 +75,16 @@ def start_scheduler():
         name='목표 비율 자동매매',
         replace_existing=True,
     )
+
+    # 거래소 수수료 환급(페이백) 크롤링 (기본 6시간마다)
+    fee_rebate_interval_hours = getattr(settings, 'FEE_REBATE_CRAWL_INTERVAL_HOURS', 6)
+    scheduler.add_job(
+        crawl_fee_rebates_job,
+        trigger=IntervalTrigger(hours=fee_rebate_interval_hours),
+        id='crawl_fee_rebates',
+        name='수수료 환급 크롤링',
+        replace_existing=True,
+    )
     
     register_events(scheduler)
     
@@ -236,6 +246,24 @@ def run_target_allocation_job():
         notify_scheduler(
             f"❌ 목표 비율 자동매매 실패\n\n오류: {str(e)}",
             job_name="목표 비율 자동매매",
+        )
+
+
+def crawl_fee_rebates_job():
+    """거래소 수수료 환급(페이백) 크롤링 작업 (스케줄러에서 호출)"""
+    from .crawlers_fee_rebate import crawl_fee_rebates
+    from .notifications import notify_scheduler
+
+    try:
+        count = crawl_fee_rebates()
+        if count > 0:
+            message = f"✅ 수수료 환급 크롤링 완료\n\n반영된 건수: {count}건"
+            notify_scheduler(message, job_name="수수료 환급 크롤링")
+    except Exception as e:
+        logger.exception("수수료 환급 크롤링 중 오류: %s", e)
+        notify_scheduler(
+            f"❌ 수수료 환급 크롤링 실패\n\n오류: {str(e)}",
+            job_name="수수료 환급 크롤링",
         )
 
 

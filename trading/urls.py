@@ -1,7 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
-from .views import OrderViewSet, AccountViewSet, SymbolViewSet, DailyRealizedProfitViewSet, BrokerViewSet, HoldingViewSet, TargetAllocationPlanViewSet, signup
+from .views import OrderViewSet, AccountViewSet, SymbolViewSet, DailyRealizedProfitViewSet, BrokerViewSet, HoldingViewSet, TargetAllocationPlanViewSet, ExchangeFeeRebateViewSet, signup
 from .oauth2_views import google_oauth2_login, google_oauth2_callback
 
 router = DefaultRouter()
@@ -12,6 +12,7 @@ router.register(r'brokers', BrokerViewSet, basename='broker')
 router.register(r'holdings', HoldingViewSet, basename='holding')
 router.register(r'target-allocation-plans', TargetAllocationPlanViewSet, basename='target-allocation-plan')
 router.register(r'daily-profits', DailyRealizedProfitViewSet, basename='daily-profit')
+router.register(r'fee-rebates', ExchangeFeeRebateViewSet, basename='fee-rebate')
 
 urlpatterns = [
     # 회원가입

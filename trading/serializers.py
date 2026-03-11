@@ -2,7 +2,7 @@ from rest_framework import serializers
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
-from .models import Order, Account, Symbol, Broker, DailyRealizedProfit, Holding, TargetAllocationPlan
+from .models import Order, Account, Symbol, Broker, DailyRealizedProfit, Holding, TargetAllocationPlan, ExchangeFeeRebate
 from .sell_quantity import (
     resolve_sell_quantity,
     QUANTITY_TYPE_EXACT,
@@ -418,3 +418,21 @@ class TargetAllocationPlanSerializer(serializers.ModelSerializer):
         validated_data.pop('account_id', None)
         validated_data.pop('symbol_id', None)
         return super().update(instance, validated_data)
+
+
+class ExchangeFeeRebateSerializer(serializers.ModelSerializer):
+    """거래소 수수료 환급(페이백) 시리얼라이저 (조회 전용)"""
+    class Meta:
+        model = ExchangeFeeRebate
+        fields = [
+            'id', 'exchange_name', 'rebate_pct', 'trading_discount_pct',
+            'limit_order_fee_pct', 'market_order_fee_pct', 'avg_payback_krw',
+            'tags', 'source_url', 'crawled_at', 'is_active',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'exchange_name', 'rebate_pct', 'trading_discount_pct',
+            'limit_order_fee_pct', 'market_order_fee_pct', 'avg_payback_krw',
+            'tags', 'source_url', 'crawled_at', 'is_active',
+            'created_at', 'updated_at',
+        ]

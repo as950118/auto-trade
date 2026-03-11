@@ -12,11 +12,12 @@ from django.db.models import Q
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from decimal import Decimal
-from .models import Order, Account, Symbol, Broker, Country, OrderStatus, DailyRealizedProfit, Holding, TargetAllocationPlan
+from .models import Order, Account, Symbol, Broker, Country, OrderStatus, DailyRealizedProfit, Holding, TargetAllocationPlan, ExchangeFeeRebate
 from .serializers import (
     OrderCreateSerializer, OrderSerializer, OrderUpdateSerializer,
     AccountSerializer, SymbolSerializer, DailyRealizedProfitSerializer,
-    UserSerializer, BrokerSerializer, HoldingSerializer, TargetAllocationPlanSerializer
+    UserSerializer, BrokerSerializer, HoldingSerializer, TargetAllocationPlanSerializer,
+    ExchangeFeeRebateSerializer,
 )
 from .profit_calculator import ProfitCalculator
 from datetime import date as date_type
@@ -541,3 +542,17 @@ class TargetAllocationPlanViewSet(viewsets.ModelViewSet):
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied("본인 계좌만 등록할 수 있습니다.")
         serializer.save()
+
+
+class ExchangeFeeRebateViewSet(viewsets.ReadOnlyModelViewSet):
+    """거래소 수수료 환급(페이백) ViewSet (조회만 가능, 비로그인 허용)"""
+    permission_classes = [AllowAny]
+    serializer_class = ExchangeFeeRebateSerializer
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['is_active']
+    search_fields = ['exchange_name']
+    ordering_fields = ['exchange_name', 'rebate_pct', 'trading_discount_pct', 'avg_payback_krw', 'updated_at']
+    ordering = ['-rebate_pct', 'exchange_name']
+
+    def get_queryset(self):
+        return ExchangeFeeRebate.objects.filter(is_active=True)

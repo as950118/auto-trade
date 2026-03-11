@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Broker, Symbol, Account, Order, Holding, TargetAllocationPlan
+from .models import Broker, Symbol, Account, Order, Holding, TargetAllocationPlan, ExchangeFeeRebate
 
 
 @admin.register(Broker)
@@ -118,3 +118,15 @@ class TargetAllocationPlanAdmin(admin.ModelAdmin):
     search_fields = ['account__user__username', 'symbol__ticker', 'symbol__name']
     readonly_fields = ['trades_done', 'created_at', 'updated_at']
     list_editable = ['enabled']
+
+
+@admin.register(ExchangeFeeRebate)
+class ExchangeFeeRebateAdmin(admin.ModelAdmin):
+    list_display = [
+        'exchange_name', 'rebate_pct', 'trading_discount_pct',
+        'limit_order_fee_pct', 'market_order_fee_pct', 'avg_payback_krw',
+        'is_active', 'crawled_at', 'updated_at'
+    ]
+    list_filter = ['is_active', 'crawled_at']
+    search_fields = ['exchange_name']
+    list_editable = ['is_active']

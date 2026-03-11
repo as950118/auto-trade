@@ -609,3 +609,60 @@ class TargetAllocationPlan(models.Model):
             from datetime import timedelta
             self.end_date = self.start_date + timedelta(days=self.total_days)
         super().save(*args, **kwargs)
+
+
+class ExchangeFeeRebate(models.Model):
+    """거래소 수수료 환급(페이백) 정책"""
+    exchange_name = models.CharField(max_length=100, unique=True, verbose_name='거래소명')
+    rebate_pct = models.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name='페이백률 (%)'
+    )
+    trading_discount_pct = models.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name='거래 할인율 (%)'
+    )
+    limit_order_fee_pct = models.DecimalField(
+        max_digits=8,
+        decimal_places=4,
+        null=True,
+        blank=True,
+        verbose_name='지정가 수수료율 (%)'
+    )
+    market_order_fee_pct = models.DecimalField(
+        max_digits=8,
+        decimal_places=4,
+        null=True,
+        blank=True,
+        verbose_name='시장가 수수료율 (%)'
+    )
+    avg_payback_krw = models.IntegerField(
+        null=True,
+        blank=True,
+        verbose_name='1인 평균 페이백 (원)'
+    )
+    tags = models.JSONField(
+        default=list,
+        blank=True,
+        verbose_name='태그',
+        help_text='예: ["최상위 거래소", "신규 제휴"]'
+    )
+    source_url = models.URLField(max_length=500, blank=True, verbose_name='출처 URL')
+    crawled_at = models.DateTimeField(null=True, blank=True, verbose_name='크롤링 시각')
+    is_active = models.BooleanField(default=True, verbose_name='노출 여부')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='생성일시')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='수정일시')
+
+    class Meta:
+        verbose_name = '거래소 수수료 환급'
+        verbose_name_plural = '거래소 수수료 환급'
+        ordering = ['-rebate_pct', 'exchange_name']
+
+    def __str__(self):
+        return f"{self.exchange_name} (페이백 {self.rebate_pct}%)"
