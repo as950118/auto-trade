@@ -2,7 +2,7 @@ from decimal import Decimal
 
 from django.db import models
 from django.contrib.auth.models import User
-from django.core.validators import MinValueValidator
+from django.core.validators import MinValueValidator, MaxValueValidator
 from django.utils import timezone
 
 
@@ -523,4 +523,89 @@ class Holding(models.Model):
             self.profit_loss = Decimal('0')
             self.profit_rate = Decimal('0')
         
+        super().save(*args, **kwargs)
+
+
+class TargetAllocationPlan(models.Model):
+    """
+    목표 비율 자동매매 계획.
+    특정 종목이 총 자산(현물+예수금 등)에서 차지할 비율을 목표로,
+    지정한 일수 동안 지정한 횟수만큼 나눠서 매수/매도하는 계획.
+    """
+    account = models.ForeignKey(
+        Account,
+        on_delete=models.CASCADE,
+        related_name='target_allocation_plans',
+        verbose_name='계좌'
+    )
+    symbol = models.ForeignKey(
+        Symbol,
+        on_delete=models.CASCADE,
+        related_name='target_allocation_plans',
+        verbose_name='종목'
+    )
+    target_ratio = models.DecimalField(
+        max_digits=6,
+        decimal_places=4,
+        validators=[MinValueValidator(0), MaxValueValidator(1)],
+        verbose_name='목표 비율 (0~1, 예: 0.2 = 20%)',
+        help_text='총 자산 대비 이 종목이 차지할 목표 비율'
+    )
+    total_days = models.PositiveIntegerField(
+        verbose_name='총 일수',
+        help_text='몇 일에 걸쳐 매매할지'
+    )
+    num_trades = models.PositiveIntegerField(
+        verbose_name='분할 횟수',
+        help_text='몇 번에 나눠서 매매할지'
+    )
+    trades_done = models.PositiveIntegerField(
+        default=0,
+        verbose_name='완료된 매매 횟수'
+    )
+    start_date = models.DateField(
+        null=True,
+        blank=True,
+        verbose_name='시작일',
+        help_text='비우면 저장 시 오늘로 설정됨'
+    )
+    end_date = models.DateField(
+        null=True,
+        blank=True,
+        verbose_name='종료일',
+        help_text='비우면 start_date + total_days 로 설정됨'
+    )
+    enabled = models.BooleanField(
+        default=True,
+        verbose_name='활성 여부'
+    )
+    order_type = models.CharField(
+        max_length=10,
+        choices=OrderType.choices,
+        default=OrderType.MARKET,
+        verbose_name='주문 타입'
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='생성일시')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='수정일시')
+
+    class Meta:
+        verbose_name = '목표 비율 자동매매 계획'
+        verbose_name_plural = '목표 비율 자동매매 계획들'
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['account', 'symbol'],
+                name='unique_account_symbol_plan'
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.account} / {self.symbol.ticker} 목표 {float(self.target_ratio)*100:.1f}% ({self.trades_done}/{self.num_trades})"
+    
+    def save(self, *args, **kwargs):
+        if self.start_date is None:
+            self.start_date = timezone.now().date()
+        if self.end_date is None and self.start_date and self.total_days:
+            from datetime import timedelta
+            self.end_date = self.start_date + timedelta(days=self.total_days)
         super().save(*args, **kwargs)

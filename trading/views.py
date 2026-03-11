@@ -12,11 +12,11 @@ from django.db.models import Q
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from decimal import Decimal
-from .models import Order, Account, Symbol, Broker, Country, OrderStatus, DailyRealizedProfit, Holding
+from .models import Order, Account, Symbol, Broker, Country, OrderStatus, DailyRealizedProfit, Holding, TargetAllocationPlan
 from .serializers import (
     OrderCreateSerializer, OrderSerializer, OrderUpdateSerializer,
     AccountSerializer, SymbolSerializer, DailyRealizedProfitSerializer,
-    UserSerializer, BrokerSerializer, HoldingSerializer
+    UserSerializer, BrokerSerializer, HoldingSerializer, TargetAllocationPlanSerializer
 )
 from .profit_calculator import ProfitCalculator
 from datetime import date as date_type
@@ -521,3 +521,23 @@ class HoldingViewSet(viewsets.ReadOnlyModelViewSet):
         holdings = self.get_queryset().filter(account=account)
         serializer = self.get_serializer(holdings, many=True)
         return Response(serializer.data)
+
+
+class TargetAllocationPlanViewSet(viewsets.ModelViewSet):
+    """목표 비율 자동매매 계획 ViewSet (CRUD)"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = TargetAllocationPlanSerializer
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filterset_fields = ['account', 'symbol', 'enabled']
+    ordering_fields = ['created_at', 'start_date', 'end_date']
+    ordering = ['-created_at']
+
+    def get_queryset(self):
+        return TargetAllocationPlan.objects.filter(account__user=self.request.user)
+
+    def perform_create(self, serializer):
+        account = serializer.validated_data.get('account_id') or serializer.validated_data.get('account')
+        if account and account.user != self.request.user:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("본인 계좌만 등록할 수 있습니다.")
+        serializer.save()

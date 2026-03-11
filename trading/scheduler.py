@@ -65,6 +65,16 @@ def start_scheduler():
         name='암호화폐 시세 업데이트',
         replace_existing=True,
     )
+
+    # 목표 비율 자동매매 계획 실행 (6시간마다: 기간 내 분할 매매 1회씩 진행)
+    allocation_interval_hours = getattr(settings, 'TARGET_ALLOCATION_RUN_INTERVAL_HOURS', 6)
+    scheduler.add_job(
+        run_target_allocation_job,
+        trigger=IntervalTrigger(hours=allocation_interval_hours),
+        id='run_target_allocation',
+        name='목표 비율 자동매매',
+        replace_existing=True,
+    )
     
     register_events(scheduler)
     
@@ -208,6 +218,24 @@ def calculate_daily_profit_job():
         notify_scheduler(
             f"❌ 일일 실현 손익 계산 실패\n\n오류: {str(e)}",
             job_name="일일 실현 손익 계산"
+        )
+
+
+def run_target_allocation_job():
+    """목표 비율 자동매매 계획 실행 (스케줄러에서 호출)"""
+    from .tasks import run_target_allocation_plans
+    from .notifications import notify_scheduler
+
+    try:
+        created_count = run_target_allocation_plans()
+        if created_count > 0:
+            message = f"✅ 목표 비율 자동매매\n\n생성된 주문: {created_count}건"
+            notify_scheduler(message, job_name="목표 비율 자동매매")
+    except Exception as e:
+        logger.exception("목표 비율 자동매매 실행 중 오류: %s", e)
+        notify_scheduler(
+            f"❌ 목표 비율 자동매매 실패\n\n오류: {str(e)}",
+            job_name="목표 비율 자동매매",
         )
 
 

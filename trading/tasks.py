@@ -5,7 +5,8 @@ import logging
 from decimal import Decimal
 from django.utils import timezone
 from django.db import transaction
-from .models import Order, OrderStatus, Account, Holding, Symbol, Currency
+from django.db.models import F
+from .models import Order, OrderStatus, Account, Holding, Symbol, Currency, TargetAllocationPlan
 from .clients import get_broker_client
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,121 @@ def process_order(order: Order):
         order.status = OrderStatus.REJECTED
         order.save()
         logger.error(f"주문 처리 중 오류 발생 (Order ID: {order.id}): {str(e)}")
+
+
+def run_target_allocation_plans():
+    """
+    목표 비율 자동매매 계획 실행.
+    총 자산 대비 목표 비율까지, 설정한 일수/횟수에 맞춰 분할 매수/매도 주문을 생성한다.
+    """
+    from datetime import timedelta
+    from decimal import ROUND_DOWN
+
+    today = timezone.now().date()
+    plans = TargetAllocationPlan.objects.filter(
+        enabled=True,
+        trades_done__lt=F('num_trades'),
+        start_date__lte=today,
+        end_date__gte=today,
+    ).select_related('account', 'symbol')
+
+    created_count = 0
+    for plan in plans:
+        try:
+            account = plan.account
+            symbol = plan.symbol
+            currency = symbol.currency
+
+            # 총 자산 (종목 통화 기준)
+            if currency == 'KRW':
+                total_assets = account.total_assets_krw or Decimal('0')
+            else:
+                total_assets = account.total_assets_usd or Decimal('0')
+
+            if total_assets <= 0:
+                logger.warning(f"목표비율 계획 {plan.id}: 총 자산 0, 스킵")
+                continue
+
+            # 해당 종목 현재 보유 가치
+            try:
+                holding = Holding.objects.get(account=account, symbol=symbol)
+                current_value = holding.total_value or Decimal('0')
+                current_price = holding.current_price or holding.average_price or Decimal('0')
+            except Holding.DoesNotExist:
+                current_value = Decimal('0')
+                current_price = Decimal('0')
+                # 현재가 없으면 시세 조회는 별도 로직 필요; 여기서는 스킵
+                logger.warning(f"목표비율 계획 {plan.id}: 보유/시세 없음, 스킵")
+                continue
+
+            if current_price <= 0:
+                logger.warning(f"목표비율 계획 {plan.id}: 현재가 0, 스킵")
+                continue
+
+            target_value = (total_assets * plan.target_ratio).quantize(Decimal('0.01'), rounding=ROUND_DOWN)
+            deficit = target_value - current_value
+            remaining = plan.num_trades - plan.trades_done
+            if remaining <= 0:
+                continue
+
+            # 이번에 실행할 횟수: 기간 내 진행률에 맞춰 1회씩
+            total_days = (plan.end_date - plan.start_date).days or 1
+            elapsed_days = (today - plan.start_date).days
+            trades_should_have = min(plan.num_trades, int(plan.num_trades * elapsed_days / total_days))
+            to_do = max(0, trades_should_have - plan.trades_done)
+            if to_do <= 0:
+                continue
+
+            # 1회분 금액 (부족분을 남은 횟수로 나눔)
+            order_amount = (deficit / remaining).quantize(Decimal('0.01'), rounding=ROUND_DOWN)
+            min_order_value = Decimal('0.01')  # 최소 주문 금액
+            if abs(order_amount) < min_order_value:
+                continue
+
+            side = 'BUY' if order_amount > 0 else 'SELL'
+            if side == 'BUY' and not account.buy_enabled:
+                logger.warning(f"목표비율 계획 {plan.id}: 매수 비활성화")
+                continue
+            if side == 'SELL' and not account.sell_enabled:
+                logger.warning(f"목표비율 계획 {plan.id}: 매도 비활성화")
+                continue
+
+            if side == 'BUY':
+                quantity = (order_amount / current_price).quantize(Decimal('0.00000001'), rounding=ROUND_DOWN)
+            else:
+                # 매도: 금액만큼 팔 수량
+                quantity = (abs(order_amount) / current_price).quantize(Decimal('0.00000001'), rounding=ROUND_DOWN)
+                # 보유 수량 초과 방지
+                try:
+                    h = Holding.objects.get(account=account, symbol=symbol)
+                    if quantity > h.quantity:
+                        quantity = h.quantity
+                except Holding.DoesNotExist:
+                    continue
+                if quantity <= 0:
+                    continue
+
+            if quantity <= 0:
+                continue
+
+            price = current_price if plan.order_type == 'LIMIT' else None
+            order = Order.objects.create(
+                account=account,
+                symbol=symbol,
+                side=side,
+                order_type=plan.order_type,
+                quantity=quantity,
+                price=price,
+                status=OrderStatus.PENDING,
+            )
+            plan.trades_done += 1
+            plan.save(update_fields=['trades_done', 'updated_at'])
+            created_count += 1
+            logger.info(f"목표비율 계획 {plan.id}: {side} 주문 생성 (Order {order.id}), {plan.trades_done}/{plan.num_trades}")
+        except Exception as e:
+            logger.exception(f"목표비율 계획 {plan.id} 실행 중 오류: {e}")
+
+    return created_count
 
 
 def check_order_status(order: Order, client=None):

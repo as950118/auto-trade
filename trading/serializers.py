@@ -2,7 +2,7 @@ from rest_framework import serializers
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
-from .models import Order, Account, Symbol, Broker, DailyRealizedProfit, Holding
+from .models import Order, Account, Symbol, Broker, DailyRealizedProfit, Holding, TargetAllocationPlan
 from .sell_quantity import (
     resolve_sell_quantity,
     QUANTITY_TYPE_EXACT,
@@ -378,3 +378,43 @@ class OrderSerializer(serializers.ModelSerializer):
             'filled_quantity', 'average_filled_price',
             'created_at', 'updated_at', 'filled_at'
         ]
+
+
+class TargetAllocationPlanSerializer(serializers.ModelSerializer):
+    """목표 비율 자동매매 계획 시리얼라이저"""
+    account = AccountSerializer(read_only=True)
+    account_id = serializers.PrimaryKeyRelatedField(queryset=Account.objects.none(), write_only=True)
+    symbol = SymbolSerializer(read_only=True)
+    symbol_id = serializers.PrimaryKeyRelatedField(queryset=Symbol.objects.all(), write_only=True)
+    order_type_display = serializers.CharField(source='get_order_type_display', read_only=True)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            self.fields['account_id'].queryset = Account.objects.filter(user=request.user)
+
+    class Meta:
+        model = TargetAllocationPlan
+        fields = [
+            'id', 'account', 'account_id', 'symbol', 'symbol_id',
+            'target_ratio', 'total_days', 'num_trades', 'trades_done',
+            'start_date', 'end_date', 'enabled', 'order_type', 'order_type_display',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'trades_done', 'created_at', 'updated_at']
+
+    def validate_target_ratio(self, value):
+        if value is not None and (value < 0 or value > 1):
+            raise serializers.ValidationError('목표 비율은 0~1 사이여야 합니다. (예: 0.2 = 20%)')
+        return value
+
+    def create(self, validated_data):
+        validated_data['account'] = validated_data.pop('account_id')
+        validated_data['symbol'] = validated_data.pop('symbol_id')
+        return TargetAllocationPlan.objects.create(**validated_data)
+
+    def update(self, instance, validated_data):
+        validated_data.pop('account_id', None)
+        validated_data.pop('symbol_id', None)
+        return super().update(instance, validated_data)

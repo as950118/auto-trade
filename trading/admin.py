@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Broker, Symbol, Account, Order, Holding
+from .models import Broker, Symbol, Account, Order, Holding, TargetAllocationPlan
 
 
 @admin.register(Broker)
@@ -106,3 +106,15 @@ class HoldingAdmin(admin.ModelAdmin):
             'fields': ('created_at', 'updated_at')
         }),
     )
+
+
+@admin.register(TargetAllocationPlan)
+class TargetAllocationPlanAdmin(admin.ModelAdmin):
+    list_display = [
+        'account', 'symbol', 'target_ratio', 'total_days', 'num_trades',
+        'trades_done', 'start_date', 'end_date', 'enabled', 'order_type', 'created_at'
+    ]
+    list_filter = ['enabled', 'order_type', 'created_at']
+    search_fields = ['account__user__username', 'symbol__ticker', 'symbol__name']
+    readonly_fields = ['trades_done', 'created_at', 'updated_at']
+    list_editable = ['enabled']
