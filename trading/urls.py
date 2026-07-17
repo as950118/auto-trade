@@ -1,8 +1,19 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
-from .views import OrderViewSet, AccountViewSet, SymbolViewSet, DailyRealizedProfitViewSet, BrokerViewSet, HoldingViewSet, TargetAllocationPlanViewSet, ExchangeFeeRebateViewSet, signup
-from .oauth2_views import google_oauth2_login, google_oauth2_callback
+from .views import (
+    OrderViewSet,
+    AccountViewSet,
+    SymbolViewSet,
+    DailyRealizedProfitViewSet,
+    BrokerViewSet,
+    HoldingViewSet,
+    TargetAllocationPlanViewSet,
+    ExchangeFeeRebateViewSet,
+    signup,
+    google_oauth2_login,
+    google_oauth2_callback,
+)
 
 router = DefaultRouter()
 router.register(r'accounts', AccountViewSet, basename='account')
