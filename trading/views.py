@@ -188,18 +188,60 @@ def google_oauth2_callback(request):
             {'detail': 'Google 계정에서 이메일을 가져올 수 없습니다.'},
             status=status.HTTP_400_BAD_REQUEST
         )
-    user, created = User.objects.get_or_create(
-        username=email,
-        defaults={'email': email}
+    # 표시 이름: Google 프로필 name (없으면 given_name, 최후 이메일 로컬파트)
+    google_name = (
+        (user_info.get('name') or '').strip()
+        or (user_info.get('given_name') or '').strip()
+        or email.split('@')[0]
     )
-    if created:
+
+    # 이메일로 기존 사용자 찾기 (과거 username=email 로 가입한 경우도 포함)
+    user = User.objects.filter(email__iexact=email).first()
+    if user is None:
+        user = User.objects.filter(username=email).first()
+
+    if user is None:
+        base_username = email.split('@')[0][:140] or 'user'
+        # Django username: 글자/숫자/@/./+/-/_ 만 허용 → 간단히 정리
+        safe_base = ''.join(
+            c if (c.isalnum() or c in '@.+-_') else '_'
+            for c in base_username
+        ) or 'user'
+        username = safe_base
+        counter = 1
+        while User.objects.filter(username=username).exists():
+            username = f'{safe_base}{counter}'
+            counter += 1
+        user = User(
+            username=username,
+            email=email,
+            first_name=google_name[:150],
+        )
         user.set_unusable_password()
         user.save()
+    else:
+        # 기존 계정: email/표시이름 보강 (username은 유지)
+        updated = False
+        if not user.email:
+            user.email = email
+            updated = True
+        if not user.first_name and google_name:
+            user.first_name = google_name[:150]
+            updated = True
+        if updated:
+            user.save(update_fields=['email', 'first_name'])
+
+    display_name = (user.first_name or user.username).strip()
     refresh = RefreshToken.for_user(user)
     return Response({
         'access': str(refresh.access_token),
         'refresh': str(refresh),
-        'user': {'username': user.username},
+        'user': {
+            'username': user.username,
+            'email': user.email,
+            'first_name': user.first_name,
+            'display_name': display_name,
+        },
     })
 
 
