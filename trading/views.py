@@ -140,14 +140,27 @@ def google_oauth2_callback(request):
         timeout=10,
     )
     if token_response.status_code != 200:
+        try:
+            google_error = token_response.json()
+        except ValueError:
+            google_error = {'raw': token_response.text[:500]}
         return Response(
-            {'detail': 'Google 토큰 교환에 실패했습니다.'},
+            {
+                'detail': 'Google 토큰 교환에 실패했습니다.',
+                'redirect_uri': redirect_uri,
+                'frontend_url': frontend_url,
+                'google_status': token_response.status_code,
+                'google_error': google_error,
+            },
             status=status.HTTP_400_BAD_REQUEST
         )
     access_token = token_response.json().get('access_token')
     if not access_token:
         return Response(
-            {'detail': 'Google에서 access_token을 받지 못했습니다.'},
+            {
+                'detail': 'Google에서 access_token을 받지 못했습니다.',
+                'google_response': token_response.json(),
+            },
             status=status.HTTP_400_BAD_REQUEST
         )
     user_response = requests.get(
@@ -156,8 +169,16 @@ def google_oauth2_callback(request):
         timeout=10,
     )
     if user_response.status_code != 200:
+        try:
+            google_error = user_response.json()
+        except ValueError:
+            google_error = {'raw': user_response.text[:500]}
         return Response(
-            {'detail': 'Google 사용자 정보를 가져오지 못했습니다.'},
+            {
+                'detail': 'Google 사용자 정보를 가져오지 못했습니다.',
+                'google_status': user_response.status_code,
+                'google_error': google_error,
+            },
             status=status.HTTP_400_BAD_REQUEST
         )
     user_info = user_response.json()
