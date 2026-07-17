@@ -44,6 +44,63 @@ class UserSerializer(serializers.ModelSerializer):
         return user
 
 
+class MeSerializer(serializers.ModelSerializer):
+    """현재 로그인 사용자 프로필"""
+    display_name = serializers.SerializerMethodField()
+    has_usable_password = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = [
+            'id',
+            'username',
+            'email',
+            'first_name',
+            'display_name',
+            'has_usable_password',
+        ]
+
+    def get_display_name(self, obj):
+        return (obj.first_name or obj.username or '').strip()
+
+    def get_has_usable_password(self, obj):
+        return obj.has_usable_password()
+
+
+class SetPasswordSerializer(serializers.Serializer):
+    """비밀번호 설정/변경 (로그인 필수)"""
+    password = serializers.CharField(write_only=True, required=True, validators=[validate_password])
+    password2 = serializers.CharField(write_only=True, required=True)
+    current_password = serializers.CharField(
+        write_only=True,
+        required=False,
+        allow_blank=True,
+        help_text='이미 비밀번호가 있는 계정은 현재 비밀번호 필수',
+    )
+
+    def validate(self, attrs):
+        user = self.context['request'].user
+        if attrs['password'] != attrs['password2']:
+            raise serializers.ValidationError({'password': '비밀번호가 일치하지 않습니다.'})
+        if user.has_usable_password():
+            current = attrs.get('current_password') or ''
+            if not current:
+                raise serializers.ValidationError(
+                    {'current_password': '현재 비밀번호를 입력해 주세요.'}
+                )
+            if not user.check_password(current):
+                raise serializers.ValidationError(
+                    {'current_password': '현재 비밀번호가 올바르지 않습니다.'}
+                )
+        return attrs
+
+    def save(self, **kwargs):
+        user = self.context['request'].user
+        user.set_password(self.validated_data['password'])
+        user.save(update_fields=['password'])
+        return user
+
+
 class BrokerSerializer(serializers.ModelSerializer):
     """브로커 시리얼라이저"""
     country_display = serializers.CharField(source='get_country_display', read_only=True)

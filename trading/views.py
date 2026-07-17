@@ -16,7 +16,8 @@ from .models import Order, Account, Symbol, Broker, Country, OrderStatus, DailyR
 from .serializers import (
     OrderCreateSerializer, OrderSerializer, OrderUpdateSerializer,
     AccountSerializer, SymbolSerializer, DailyRealizedProfitSerializer,
-    UserSerializer, BrokerSerializer, HoldingSerializer, TargetAllocationPlanSerializer,
+    UserSerializer, MeSerializer, SetPasswordSerializer,
+    BrokerSerializer, HoldingSerializer, TargetAllocationPlanSerializer,
     ExchangeFeeRebateSerializer,
 )
 from .profit_calculator import ProfitCalculator
@@ -68,6 +69,47 @@ def signup(request):
             },
             status=status.HTTP_201_CREATED
         )
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@extend_schema(
+    summary='내 프로필',
+    description='현재 로그인 사용자 정보와 비밀번호 설정 여부를 반환합니다.',
+    responses={200: MeSerializer},
+    tags=['인증']
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def me(request):
+    """현재 사용자 프로필"""
+    return Response(MeSerializer(request.user).data)
+
+
+@extend_schema(
+    summary='비밀번호 설정/변경',
+    description=(
+        '로그인된 사용자가 비밀번호를 설정하거나 변경합니다. '
+        'Google 가입 계정(비밀번호 없음)은 current_password 없이 최초 설정 가능하고, '
+        '이미 비밀번호가 있으면 current_password가 필요합니다.'
+    ),
+    request=SetPasswordSerializer,
+    responses={
+        200: OpenApiResponse(description='설정 완료'),
+        400: OpenApiResponse(description='검증 실패'),
+    },
+    tags=['인증']
+)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def set_password(request):
+    """비밀번호 설정/변경"""
+    serializer = SetPasswordSerializer(data=request.data, context={'request': request})
+    if serializer.is_valid():
+        serializer.save()
+        return Response({
+            'message': '비밀번호가 설정되었습니다. 이제 사용자명과 비밀번호로 로그인할 수 있습니다.',
+            'user': MeSerializer(request.user).data,
+        })
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 

@@ -11,6 +11,8 @@ from .views import (
     TargetAllocationPlanViewSet,
     ExchangeFeeRebateViewSet,
     signup,
+    me,
+    set_password,
     google_oauth2_login,
     google_oauth2_callback,
 )
@@ -26,8 +28,10 @@ router.register(r'daily-profits', DailyRealizedProfitViewSet, basename='daily-pr
 router.register(r'fee-rebates', ExchangeFeeRebateViewSet, basename='fee-rebate')
 
 urlpatterns = [
-    # 회원가입
+    # 회원가입 / 프로필
     path('api/users/', signup, name='signup'),
+    path('api/users/me/', me, name='me'),
+    path('api/users/me/password/', set_password, name='set-password'),
     
     # JWT 인증
     path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
