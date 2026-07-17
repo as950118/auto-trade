@@ -376,17 +376,18 @@ def update_holdings(account: Account, holdings_data: list):
         
         logger.debug(f"보유 종목 처리: {ticker} ({currency})")
         
-        # 통화 확인 (해외 주식인지 확인)
-        currency = holding_info.get('currency', 'KRW')
-        if currency == 'USD':
-            symbol_currency = Currency.USD
-        elif currency == 'USDT':
+        # holding_info.currency를 우선 사용 (Upbit KRW 마켓은 KRW)
+        currency_code = (holding_info.get('currency') or 'KRW').upper()
+        valid_currencies = {choice.value for choice in Currency}
+        if currency_code in valid_currencies:
+            symbol_currency = currency_code
+        elif account.broker.is_crypto_exchange:
+            # 알 수 없는 암호화폐 페어 기본값
             symbol_currency = Currency.USDT
         else:
-            # 기본값: 암호화폐 거래소면 USDT, 아니면 KRW
-            symbol_currency = account.broker.is_crypto_exchange and Currency.USDT or Currency.KRW
+            symbol_currency = Currency.KRW
         
-        # Symbol 찾기 또는 생성
+        # Symbol 찾기 또는 생성 (티커는 전역 unique)
         symbol, _ = Symbol.objects.get_or_create(
             ticker=ticker,
             defaults={
@@ -396,8 +397,7 @@ def update_holdings(account: Account, holdings_data: list):
                 'is_crypto': account.broker.is_crypto_exchange,
             }
         )
-        
-        # Symbol의 currency 업데이트 (기존 Symbol이 다른 통화로 설정되어 있을 수 있음)
+
         if symbol.currency != symbol_currency:
             symbol.currency = symbol_currency
             symbol.save(update_fields=['currency'])

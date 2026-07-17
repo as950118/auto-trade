@@ -8,7 +8,7 @@ import hmac
 import hashlib
 import time
 import urllib.parse
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from typing import Dict, Optional
 from datetime import timedelta
 from django.utils import timezone
@@ -74,31 +74,59 @@ class UpbitClient(BaseBrokerClient):
         
         # pyupbit 초기화
         self.upbit = pyupbit.Upbit(account.api_key, account.api_secret)
+
+    @staticmethod
+    def to_market_ticker(ticker: str) -> str:
+        """심볼 티커(BTC)를 Upbit 마켓 코드(KRW-BTC)로 변환"""
+        if not ticker:
+            return ticker
+        if ticker.startswith(('KRW-', 'BTC-', 'USDT-')):
+            return ticker
+        return f"KRW-{ticker}"
+
+    @staticmethod
+    def to_symbol_ticker(market_or_currency: str) -> str:
+        """업비트 마켓/통화 코드를 시스템 티커로 변환 (KRW-BTC -> BTC)"""
+        if not market_or_currency:
+            return market_or_currency
+        if '-' in market_or_currency:
+            return market_or_currency.split('-')[-1]
+        return market_or_currency
     
     def place_order(self, order: Order) -> Dict:
         """Upbit 주문 실행"""
         try:
-            symbol = order.symbol
-            ticker = symbol.ticker
-            
-            # Upbit 티커 형식 변환 (예: BTC-KRW)
-            if not ticker.startswith('KRW-') and not ticker.startswith('BTC-') and not ticker.startswith('USDT-'):
-                ticker = f"KRW-{ticker}"
+            ticker = self.to_market_ticker(order.symbol.ticker)
             
             if order.order_type == 'MARKET':
                 # 시장가 주문
                 if order.side == 'BUY':
-                    result = self.upbit.buy_market_order(ticker, order.quantity)
+                    # pyupbit buy_market_order 2번째 인자는 코인 수량이 아니라 KRW 금액
+                    current_price = pyupbit.get_current_price(ticker)
+                    if not current_price:
+                        return {'success': False, 'error': f'현재가 조회 실패: {ticker}'}
+                    krw_amount = (Decimal(str(order.quantity)) * Decimal(str(current_price))).quantize(
+                        Decimal('1'), rounding=ROUND_DOWN
+                    )
+                    if krw_amount < 5000:
+                        return {
+                            'success': False,
+                            'error': f'최소 주문금액 미달: {krw_amount}원 (최소 5,000원)'
+                        }
+                    result = self.upbit.buy_market_order(ticker, float(krw_amount))
                 else:  # SELL
-                    result = self.upbit.sell_market_order(ticker, order.quantity)
+                    result = self.upbit.sell_market_order(ticker, float(order.quantity))
             else:  # LIMIT
                 # 지정가 주문
                 if order.side == 'BUY':
-                    result = self.upbit.buy_limit_order(ticker, float(order.price), order.quantity)
+                    result = self.upbit.buy_limit_order(ticker, float(order.price), float(order.quantity))
                 else:  # SELL
-                    result = self.upbit.sell_limit_order(ticker, float(order.price), order.quantity)
+                    result = self.upbit.sell_limit_order(ticker, float(order.price), float(order.quantity))
+
+            if result is None:
+                return {'success': False, 'error': '업비트 주문 응답이 없습니다.'}
             
-            if 'error' in result:
+            if isinstance(result, dict) and 'error' in result:
                 return {
                     'success': False,
                     'error': result.get('error', {}).get('message', '주문 실패')
@@ -120,71 +148,76 @@ class UpbitClient(BaseBrokerClient):
         try:
             # Upbit 잔고 조회
             balances = self.upbit.get_balances()
-            
-            if 'error' in balances:
-                return {
-                    'success': False,
-                    'error': balances.get('error', {}).get('message', '잔고 조회 실패')
-                }
+
+            if not isinstance(balances, list):
+                if isinstance(balances, dict):
+                    error = balances.get('error') or {}
+                    return {
+                        'success': False,
+                        'error': error.get('message', str(balances)),
+                    }
+                return {'success': False, 'error': '잔고 조회 실패'}
             
             cash_balance = Decimal('0')
             stock_value = Decimal('0')
             holdings = []
             
-            # KRW 잔고 찾기
             for balance in balances:
                 currency = balance.get('currency', '')
                 if currency == 'KRW':
-                    cash_balance = Decimal(str(balance.get('balance', 0)))
-                else:
-                    # 암호화폐 보유량 * 현재가
-                    locked = Decimal(str(balance.get('locked', 0)))
-                    balance_amount = Decimal(str(balance.get('balance', 0)))
-                    total_amount = balance_amount + locked
-                    
-                    if total_amount > 0:
-                        # 현재가 조회
-                        ticker = f"KRW-{currency}"
-                        try:
-                            current_price = pyupbit.get_current_price(ticker)
-                            if current_price:
-                                current_price_decimal = Decimal(str(current_price))
-                                value = total_amount * current_price_decimal
-                                stock_value += value
-                                
-                                # 보유 종목 정보 추가
-                                holdings.append({
-                                    'ticker': ticker,
-                                    'name': currency,
-                                    'quantity': total_amount,
-                                    'current_price': current_price_decimal,
-                                    'total_value': value,
-                                    'average_price': Decimal('0'),  # Upbit는 평균 매수가 정보를 제공하지 않음
-                                    'currency': 'KRW',
-                                })
-                        except:
-                            pass
+                    cash_balance = Decimal(str(balance.get('balance', 0) or 0))
+                    continue
+
+                locked = Decimal(str(balance.get('locked', 0) or 0))
+                balance_amount = Decimal(str(balance.get('balance', 0) or 0))
+                total_amount = balance_amount + locked
+                if total_amount <= 0:
+                    continue
+
+                # 크롤링 종목과 동일하게 티커는 코인 코드(BTC)로 저장
+                symbol_ticker = self.to_symbol_ticker(currency)
+                market = self.to_market_ticker(symbol_ticker)
+                avg_buy_price = Decimal(str(balance.get('avg_buy_price', 0) or 0))
+
+                current_price_decimal = Decimal('0')
+                try:
+                    current_price = pyupbit.get_current_price(market)
+                    if current_price:
+                        current_price_decimal = Decimal(str(current_price))
+                except Exception as e:
+                    logger.warning(f"Upbit 현재가 조회 실패 ({market}): {e}")
+
+                # 상장폐지/미지원 마켓은 평균매수가로 평가
+                price_for_value = current_price_decimal if current_price_decimal > 0 else avg_buy_price
+                value = total_amount * price_for_value if price_for_value > 0 else Decimal('0')
+                stock_value += value
+
+                holdings.append({
+                    'ticker': symbol_ticker,
+                    'name': currency,
+                    'quantity': total_amount,
+                    'current_price': current_price_decimal,
+                    'total_value': value,
+                    'average_price': avg_buy_price,
+                    'currency': 'KRW',
+                })
             
             # 통화별 자산 계산 (Upbit는 KRW 기준)
             total_assets_krw = cash_balance + stock_value
-            total_assets_usd = Decimal('0')
-            
-            # 호환성을 위한 기존 필드
-            total_assets = total_assets_krw
             
             return {
                 'success': True,
                 # 호환성 필드 (원화 기준)
                 'cash_balance': cash_balance,
                 'stock_value': stock_value,
-                'total_assets': total_assets,
+                'total_assets': total_assets_krw,
                 # 통화별 필드
                 'cash_balance_krw': cash_balance,
                 'stock_value_krw': stock_value,
                 'total_assets_krw': total_assets_krw,
                 'cash_balance_usd': Decimal('0'),
                 'stock_value_usd': Decimal('0'),
-                'total_assets_usd': total_assets_usd,
+                'total_assets_usd': Decimal('0'),
                 'holdings': holdings,
                 'data': balances
             }
@@ -193,21 +226,33 @@ class UpbitClient(BaseBrokerClient):
                 'success': False,
                 'error': str(e)
             }
+
+    def get_crypto_price(self, ticker: str) -> Optional[Decimal]:
+        """Upbit 암호화폐 현재가 조회 (KRW 마켓 기준)"""
+        try:
+            market = self.to_market_ticker(ticker)
+            price = pyupbit.get_current_price(market)
+            if price:
+                return Decimal(str(price))
+            return None
+        except Exception as e:
+            logger.warning(f"Upbit 현재가 조회 실패 ({ticker}): {e}")
+            return None
     
     def get_order_status(self, order: Order) -> Dict:
         """Upbit 주문 상태 조회"""
         try:
-            # 외부 주문 ID가 있는 경우 조회
-            if order.external_order_id:
-                result = self.upbit.get_order(order.external_order_id)
-            else:
-                # 주문 목록에서 찾기 (티커로 조회)
-                ticker = order.symbol.ticker
-                if not ticker.startswith('KRW-') and not ticker.startswith('BTC-') and not ticker.startswith('USDT-'):
-                    ticker = f"KRW-{ticker}"
-                result = self.upbit.get_order(ticker)
-            
-            if 'error' in result:
+            if not order.external_order_id:
+                return {
+                    'success': False,
+                    'error': '외부 주문 ID가 없어 상태를 조회할 수 없습니다.'
+                }
+
+            result = self.upbit.get_order(order.external_order_id)
+            if result is None:
+                return {'success': False, 'error': '주문 조회 응답이 없습니다.'}
+
+            if isinstance(result, dict) and 'error' in result:
                 return {
                     'success': False,
                     'error': result.get('error', {}).get('message', '조회 실패')
