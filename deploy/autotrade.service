@@ -1,0 +1,21 @@
+[Unit]
+Description=auto-trade gunicorn
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/auto-trade
+EnvironmentFile=/opt/auto-trade/.env
+ExecStart=/opt/auto-trade/.venv/bin/gunicorn autotrade.wsgi:application \
+  --workers 1 \
+  --bind 127.0.0.1:8000 \
+  --timeout 120 \
+  --access-logfile /var/log/autotrade/access.log \
+  --error-logfile /var/log/autotrade/error.log
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

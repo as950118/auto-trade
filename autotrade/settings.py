@@ -23,12 +23,16 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/4.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-1(fgzri4ri21-3df_gp1hl1is51^vv3c_t)aoqbzrue#d%#5ki'
+SECRET_KEY = os.getenv(
+    'SECRET_KEY',
+    'django-insecure-1(fgzri4ri21-3df_gp1hl1is51^vv3c_t)aoqbzrue#d%#5ki',
+)
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.getenv('DEBUG', 'True').lower() in ('1', 'true', 'yes')
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '*']
+_allowed = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1,*')
+ALLOWED_HOSTS = [h.strip() for h in _allowed.split(',') if h.strip()]
 
 
 # Application definition
@@ -132,15 +136,18 @@ MIDDLEWARE = [
 ]
 
 # CORS 설정
-if DEBUG:
+_cors = os.getenv('CORS_ALLOWED_ORIGINS', '')
+if DEBUG and not _cors:
     # 개발 환경: 모든 origin 허용
     CORS_ALLOW_ALL_ORIGINS = True
 else:
-    # 프로덕션 환경: 특정 origin만 허용
+    CORS_ALLOW_ALL_ORIGINS = False
     CORS_ALLOWED_ORIGINS = [
+        o.strip() for o in _cors.split(',') if o.strip()
+    ] or [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
-        "https://auto-trade-view.vercel.app",  # 프로덕션 도메인으로 변경
+        "https://auto-trade-view.vercel.app",
     ]
 
 CORS_ALLOW_CREDENTIALS = True
@@ -189,17 +196,30 @@ WSGI_APPLICATION = 'autotrade.wsgi.application'
 
 # Database
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
+# DB_HOST가 있으면 Postgres(Supabase), 없으면 로컬 SQLite
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": "postgres",
-        "USER": os.getenv('DB_USER'),
-        "PASSWORD": os.getenv('DB_PASSWORD'),
-        "HOST": os.getenv('DB_HOST'),
-        "PORT": os.getenv('DB_PORT'),
+if os.getenv('DB_HOST'):
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": os.getenv('DB_NAME', 'postgres'),
+            "USER": os.getenv('DB_USER'),
+            "PASSWORD": os.getenv('DB_PASSWORD'),
+            "HOST": os.getenv('DB_HOST'),
+            "PORT": os.getenv('DB_PORT', '5432'),
+            "CONN_MAX_AGE": int(os.getenv('DB_CONN_MAX_AGE', '60')),
+            "OPTIONS": {
+                "sslmode": os.getenv('DB_SSLMODE', 'require'),
+            },
+        }
     }
-}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "db.sqlite3",
+        }
+    }
 
 # Password validation
 # https://docs.djangoproject.com/en/4.2/ref/settings/#auth-password-validators
@@ -236,6 +256,7 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/4.2/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field
