@@ -20,15 +20,16 @@ class SymbolAdmin(admin.ModelAdmin):
 class AccountAdmin(admin.ModelAdmin):
     list_display = [
         'user', 'broker', 'account_number', 'total_assets', 
-        'cash_balance', 'stock_value', 'profit_rate',
+        'cash_balance', 'stock_value', 'profit_loss', 'profit_rate',
         'buy_enabled', 'sell_enabled', 'created_at'
     ]
     list_filter = ['broker', 'buy_enabled', 'sell_enabled', 'unified_margin']
     search_fields = ['user__username', 'account_number', 'broker__name']
     readonly_fields = [
-        'total_assets', 'cash_balance', 'stock_value', 'profit_rate',  # property 필드
-        'cash_balance_krw', 'stock_value_krw', 'total_assets_krw',  # 통화별 필드
-        'cash_balance_usd', 'stock_value_usd', 'total_assets_usd',  # 통화별 필드
+        'total_assets', 'cash_balance', 'stock_value', 'profit_loss', 'profit_rate',
+        'cash_balance_krw', 'stock_value_krw', 'total_assets_krw',
+        'cash_balance_usd', 'stock_value_usd', 'total_assets_usd',
+        'profit_loss_krw', 'profit_rate_krw', 'profit_loss_usd', 'profit_rate_usd',
         'access_token', 'refresh_token', 'token_expires_at', 'token_issued_at',
         'created_at', 'updated_at'
     ]
@@ -42,9 +43,9 @@ class AccountAdmin(admin.ModelAdmin):
         }),
         ('자산 정보', {
             'fields': (
-                'total_assets', 'cash_balance', 'stock_value', 'profit_rate',
-                'cash_balance_krw', 'stock_value_krw', 'total_assets_krw',
-                'cash_balance_usd', 'stock_value_usd', 'total_assets_usd'
+                'total_assets', 'cash_balance', 'stock_value', 'profit_loss', 'profit_rate',
+                'cash_balance_krw', 'stock_value_krw', 'total_assets_krw', 'profit_loss_krw', 'profit_rate_krw',
+                'cash_balance_usd', 'stock_value_usd', 'total_assets_usd', 'profit_loss_usd', 'profit_rate_usd',
             )
         }),
         ('거래 제한 설정', {
@@ -57,7 +58,6 @@ class AccountAdmin(admin.ModelAdmin):
             'fields': ('created_at', 'updated_at')
         }),
     )
-
 
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):

@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 
 from pathlib import Path
 from dotenv import load_dotenv
+from decimal import Decimal
 import os
 
 load_dotenv()
@@ -268,3 +269,9 @@ ACCOUNT_UPDATE_INTERVAL_MINUTES = 1
 
 # 암호화폐 시세 업데이트 간격 (분)
 CRYPTO_PRICE_UPDATE_INTERVAL_MINUTES = 1
+
+# Alert 분할 매매 Leg 처리 간격 (초)
+ALERT_TRADE_LEG_INTERVAL_SECONDS = int(os.getenv('ALERT_TRADE_LEG_INTERVAL_SECONDS', '30'))
+
+# USD/USDT → KRW 환산 환율 (총자산 통합 표시용)
+USD_KRW_EXCHANGE_RATE = Decimal(os.getenv('USD_KRW_EXCHANGE_RATE', '1400'))

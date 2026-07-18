@@ -169,11 +169,46 @@ class Account(models.Model):
         validators=[MinValueValidator(0)],
         verbose_name='총 자산 (USD)'
     )
+
+    # 통화별 평가손익 / 수익률 (환율 환산 없이 분리 저장)
+    # USDT 포지션은 USD 버킷에 합산 (암호화폐 거래소 호환)
+    profit_loss_krw = models.DecimalField(
+        max_digits=20,
+        decimal_places=2,
+        default=0,
+        verbose_name='평가손익 (KRW)'
+    )
+    profit_rate_krw = models.DecimalField(
+        max_digits=10,
+        decimal_places=4,
+        default=0,
+        verbose_name='수익률 (KRW, %)'
+    )
+    profit_loss_usd = models.DecimalField(
+        max_digits=20,
+        decimal_places=2,
+        default=0,
+        verbose_name='평가손익 (USD)'
+    )
+    profit_rate_usd = models.DecimalField(
+        max_digits=10,
+        decimal_places=4,
+        default=0,
+        verbose_name='수익률 (USD, %)'
+    )
+
+    # 하위호환: 주 통화(자산이 있는 쪽) 기준 요약값
     profit_rate = models.DecimalField(
         max_digits=10,
         decimal_places=4,
         default=0,
         verbose_name='수익률 (%)'
+    )
+    profit_loss = models.DecimalField(
+        max_digits=20,
+        decimal_places=2,
+        default=0,
+        verbose_name='평가손익'
     )
     
     # 거래 제한 설정
@@ -226,36 +261,39 @@ class Account(models.Model):
 
     def __str__(self):
         return f"{self.user.username} - {self.broker.name} ({self.account_number})"
+
+    @staticmethod
+    def get_usd_krw_rate() -> Decimal:
+        from django.conf import settings
+        return Decimal(str(getattr(settings, 'USD_KRW_EXCHANGE_RATE', 1400)))
+
+    def _to_krw(self, amount: Decimal, currency: str) -> Decimal:
+        """통화 금액을 원화로 환산"""
+        amount = amount or Decimal('0')
+        if currency in ('USD', 'USDT'):
+            return amount * self.get_usd_krw_rate()
+        return amount
     
     @property
     def stock_value(self):
-        """
-        보유종목현재가치 (통합 - 원화 기준)
-        원화 보유종목가치 + (달러 보유종목가치 * 환율)
-        환율은 현재 시점의 환율을 사용해야 하지만, 간단히 원화 변환된 값을 사용
-        """
-        # stock_value_krw는 이미 해외 주식이 원화로 변환된 값이 포함되어 있음
-        # 따라서 stock_value_krw를 그대로 반환
-        return self.stock_value_krw
+        """보유종목현재가치 (통합 - 원화 기준)"""
+        return (self.stock_value_krw or Decimal('0')) + self._to_krw(
+            self.stock_value_usd or Decimal('0'), 'USD'
+        )
     
     @property
     def cash_balance(self):
-        """
-        예수금 (통합 - 원화 기준)
-        원화 예수금 + (달러 예수금 * 환율)
-        """
-        # 현재는 원화 예수금만 반환 (달러 예수금은 보통 없음)
-        # 필요시 환율 적용하여 계산 가능
-        return self.cash_balance_krw
+        """예수금 (통합 - 원화 기준)"""
+        return (self.cash_balance_krw or Decimal('0')) + self._to_krw(
+            self.cash_balance_usd or Decimal('0'), 'USD'
+        )
     
     @property
     def total_assets(self):
-        """
-        총 자산 (통합 - 원화 기준)
-        원화 총 자산 + (달러 총 자산 * 환율)
-        """
-        # total_assets_krw는 이미 해외 주식이 원화로 변환된 값이 포함되어 있음
-        return self.total_assets_krw
+        """총 자산 (통합 - 원화 기준)"""
+        return (self.total_assets_krw or Decimal('0')) + self._to_krw(
+            self.total_assets_usd or Decimal('0'), 'USD'
+        )
 
 
 class OrderType(models.TextChoices):
@@ -491,35 +529,25 @@ class Holding(models.Model):
         return f"{self.account.user.username} - {self.symbol.ticker} ({self.quantity})"
     
     def save(self, *args, **kwargs):
-        # 총 가치 계산
-        if self.quantity > 0:
-            if self.current_price > 0:
-                self.total_value = self.quantity * self.current_price
-            elif self.average_price > 0:
-                # 현재가가 없으면 평균 매수가로 계산 (임시)
-                self.total_value = self.quantity * self.average_price
-        
-        # 평가 손익 계산 (통화 구분 없이 계산 - 같은 통화 기준)
-        if self.quantity > 0 and self.average_price > 0:
-            cost = self.quantity * self.average_price
-            
-            # 현재가 결정: current_price가 있으면 사용, 없으면 average_price 사용
-            # 해외종목의 경우 current_price가 0일 수 있으므로 average_price를 fallback으로 사용
-            effective_current_price = self.current_price if self.current_price > 0 else self.average_price
-            
-            # 현재가 기준 가치 계산
-            value = self.quantity * effective_current_price
-            
-            # 평가 손익 계산
-            self.profit_loss = value - cost
-            
-            # 수익률 계산
-            if cost > 0:
-                self.profit_rate = ((value - cost) / cost) * 100
-            else:
-                self.profit_rate = Decimal('0')
+        # 총 가치: 시세가 있을 때만 시장가 평가 (없으면 0)
+        if self.quantity > 0 and self.current_price and self.current_price > 0:
+            self.total_value = self.quantity * self.current_price
         else:
-            # 수량이 0이거나 평균 매수가가 없으면 초기화
+            self.total_value = Decimal('0')
+        
+        # 평가 손익: 시세와 평균매수가가 모두 있을 때만 계산
+        if (
+            self.quantity > 0
+            and self.average_price
+            and self.average_price > 0
+            and self.current_price
+            and self.current_price > 0
+        ):
+            cost = self.quantity * self.average_price
+            value = self.quantity * self.current_price
+            self.profit_loss = value - cost
+            self.profit_rate = ((value - cost) / cost) * 100 if cost > 0 else Decimal('0')
+        else:
             self.profit_loss = Decimal('0')
             self.profit_rate = Decimal('0')
         
@@ -609,7 +637,6 @@ class TargetAllocationPlan(models.Model):
             from datetime import timedelta
             self.end_date = self.start_date + timedelta(days=self.total_days)
         super().save(*args, **kwargs)
-
 
 class ExchangeFeeRebate(models.Model):
     """거래소 수수료 환급(페이백) 정책"""

@@ -139,10 +139,13 @@ class AccountSerializer(serializers.ModelSerializer):
             'account_password', 'api_key', 'api_secret',
             'access_token', 'refresh_token', 'token_expires_at', 'token_issued_at',
             # 호환성 필드 (원화 기준)
-            'total_assets', 'cash_balance', 'stock_value', 'profit_rate',
-            # 통화별 필드
+            'total_assets', 'cash_balance', 'stock_value', 'profit_rate', 'profit_loss',
+            # 통화별 자산
             'cash_balance_krw', 'stock_value_krw', 'total_assets_krw',
             'cash_balance_usd', 'stock_value_usd', 'total_assets_usd',
+            # 통화별 손익
+            'profit_loss_krw', 'profit_rate_krw',
+            'profit_loss_usd', 'profit_rate_usd',
             'investment_limit', 'buy_enabled', 'sell_enabled',
             'unified_margin', 'overseas_etp_enabled', 'derivative_etf_enabled',
             'created_at', 'updated_at'
@@ -150,10 +153,13 @@ class AccountSerializer(serializers.ModelSerializer):
         read_only_fields = [
             'id', 'user', 
             # 호환성 필드
-            'total_assets', 'cash_balance', 'stock_value', 'profit_rate',
-            # 통화별 필드
+            'total_assets', 'cash_balance', 'stock_value', 'profit_rate', 'profit_loss',
+            # 통화별 자산
             'cash_balance_krw', 'stock_value_krw', 'total_assets_krw',
             'cash_balance_usd', 'stock_value_usd', 'total_assets_usd',
+            # 통화별 손익
+            'profit_loss_krw', 'profit_rate_krw',
+            'profit_loss_usd', 'profit_rate_usd',
             'access_token', 'refresh_token', 'token_expires_at', 
             'token_issued_at', 'created_at', 'updated_at'
         ]

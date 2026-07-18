@@ -509,61 +509,74 @@ def _recalculate_account_assets(account: Account):
 
 
 def _update_account_profit_rate(account: Account):
-    """계좌의 수익률 계산 및 업데이트"""
+    """계좌의 평가손익·수익률을 통화별로 계산 (환율 환산 없음).
+
+    - KRW 종목 → profit_loss_krw / profit_rate_krw
+    - USD·USDT 종목 → profit_loss_usd / profit_rate_usd
+    - 하위호환 profit_loss / profit_rate 는 자산이 있는 주 통화 값 사용
+    """
     from .models import Holding
-    
-    # 보유 종목들의 평가 손익과 매수 금액 합계 계산
-    holdings = Holding.objects.filter(account=account, quantity__gt=0)
-    
-    # 통화별로 구분하여 계산
+
+    holdings = Holding.objects.filter(account=account, quantity__gt=0).select_related('symbol')
+
     profit_loss_krw = Decimal('0')
     cost_krw = Decimal('0')
     profit_loss_usd = Decimal('0')
     cost_usd = Decimal('0')
-    
+
     for holding in holdings:
-        if holding.average_price > 0:
-            cost = holding.quantity * holding.average_price
-            
-            if holding.symbol.currency == 'KRW':
-                # 원화 종목
-                profit_loss_krw += holding.profit_loss
-                cost_krw += cost
-            elif holding.symbol.currency == 'USD':
-                # 달러 종목
-                profit_loss_usd += holding.profit_loss
-                cost_usd += cost
-            else:
-                # 기타 통화 (USDT 등) - 원화로 간주하거나 별도 처리
-                # 일단 원화로 처리
-                profit_loss_krw += holding.profit_loss
-                cost_krw += cost
-    
-    # 환율 적용하여 통합 계산 (USD를 원화로 변환)
-    # 실제 환율을 가져오거나, 계좌 정보에서 환율 추정
-    # 해외 주식의 경우 KisClient에서 환율 정보를 가져올 수 있음
-    # 일단 기본 환율 사용 (나중에 API에서 가져오도록 개선 가능)
-    exchange_rate = Decimal('1300')  # 기본 환율
-    
-    # 계좌에 해외 주식이 있고 환율 정보가 있으면 사용
-    # (KisClient에서 가져온 환율 정보 활용 가능)
-    if cost_usd > 0:
-        # 해외 주식이 있는 경우, 실제 환율을 사용하거나 기본값 사용
-        # TODO: 실제 환율 API 연동 또는 Holding에서 환율 정보 가져오기
-        pass
-    
-    # USD를 원화로 변환하여 통합
-    total_profit_loss = profit_loss_krw + (profit_loss_usd * exchange_rate)
-    total_cost = cost_krw + (cost_usd * exchange_rate)
-    
-    # 수익률 계산
-    if total_cost > 0:
-        account.profit_rate = (total_profit_loss / total_cost) * 100
+        if not holding.current_price or holding.current_price <= 0:
+            continue
+        if not holding.average_price or holding.average_price <= 0:
+            continue
+
+        cost = holding.quantity * holding.average_price
+        pl = holding.profit_loss or Decimal('0')
+        currency = holding.symbol.currency
+
+        if currency == 'KRW':
+            profit_loss_krw += pl
+            cost_krw += cost
+        elif currency in ('USD', 'USDT'):
+            profit_loss_usd += pl
+            cost_usd += cost
+        else:
+            # 기타 통화는 KRW 버킷에 보관
+            profit_loss_krw += pl
+            cost_krw += cost
+
+    rate_krw = (
+        ((profit_loss_krw / cost_krw) * 100).quantize(Decimal('0.0001'))
+        if cost_krw > 0 else Decimal('0')
+    )
+    rate_usd = (
+        ((profit_loss_usd / cost_usd) * 100).quantize(Decimal('0.0001'))
+        if cost_usd > 0 else Decimal('0')
+    )
+
+    account.profit_loss_krw = profit_loss_krw.quantize(Decimal('0.01'))
+    account.profit_rate_krw = rate_krw
+    account.profit_loss_usd = profit_loss_usd.quantize(Decimal('0.01'))
+    account.profit_rate_usd = rate_usd
+
+    # 주 통화 요약: 원가 기준 더 큰 쪽 (둘 다 있으면 KRW 우선)
+    if cost_usd > cost_krw:
+        account.profit_loss = account.profit_loss_usd
+        account.profit_rate = account.profit_rate_usd
     else:
-        account.profit_rate = Decimal('0')
-    
-    account.save(update_fields=['profit_rate'])
-    logger.debug(f"계좌 수익률 업데이트: {account.id} - 수익률: {account.profit_rate}% (평가손익: {total_profit_loss:,.0f}원, 매수금액: {total_cost:,.0f}원)")
+        account.profit_loss = account.profit_loss_krw
+        account.profit_rate = account.profit_rate_krw
+
+    account.save(update_fields=[
+        'profit_loss_krw', 'profit_rate_krw',
+        'profit_loss_usd', 'profit_rate_usd',
+        'profit_loss', 'profit_rate',
+    ])
+    logger.debug(
+        f"계좌 수익률 업데이트: {account.id} - "
+        f"KRW pl={account.profit_loss_krw} ({account.profit_rate_krw}%), "
+        f"USD pl={account.profit_loss_usd} ({account.profit_rate_usd}%)"
+    )
 
 
 def update_crypto_prices():

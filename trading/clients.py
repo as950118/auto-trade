@@ -187,9 +187,12 @@ class UpbitClient(BaseBrokerClient):
                 except Exception as e:
                     logger.warning(f"Upbit 현재가 조회 실패 ({market}): {e}")
 
-                # 상장폐지/미지원 마켓은 평균매수가로 평가
-                price_for_value = current_price_decimal if current_price_decimal > 0 else avg_buy_price
-                value = total_amount * price_for_value if price_for_value > 0 else Decimal('0')
+                # 상장폐지/미지원 마켓은 시세 없음 → 평가액 0 (평균매수가로 부풀리지 않음)
+                value = (
+                    total_amount * current_price_decimal
+                    if current_price_decimal > 0
+                    else Decimal('0')
+                )
                 stock_value += value
 
                 holdings.append({
