@@ -491,35 +491,25 @@ class Holding(models.Model):
         return f"{self.account.user.username} - {self.symbol.ticker} ({self.quantity})"
     
     def save(self, *args, **kwargs):
-        # 총 가치 계산
-        if self.quantity > 0:
-            if self.current_price > 0:
-                self.total_value = self.quantity * self.current_price
-            elif self.average_price > 0:
-                # 현재가가 없으면 평균 매수가로 계산 (임시)
-                self.total_value = self.quantity * self.average_price
-        
-        # 평가 손익 계산 (통화 구분 없이 계산 - 같은 통화 기준)
-        if self.quantity > 0 and self.average_price > 0:
-            cost = self.quantity * self.average_price
-            
-            # 현재가 결정: current_price가 있으면 사용, 없으면 average_price 사용
-            # 해외종목의 경우 current_price가 0일 수 있으므로 average_price를 fallback으로 사용
-            effective_current_price = self.current_price if self.current_price > 0 else self.average_price
-            
-            # 현재가 기준 가치 계산
-            value = self.quantity * effective_current_price
-            
-            # 평가 손익 계산
-            self.profit_loss = value - cost
-            
-            # 수익률 계산
-            if cost > 0:
-                self.profit_rate = ((value - cost) / cost) * 100
-            else:
-                self.profit_rate = Decimal('0')
+        # 총 가치: 시세가 있을 때만 시장가 평가 (없으면 0)
+        if self.quantity > 0 and self.current_price and self.current_price > 0:
+            self.total_value = self.quantity * self.current_price
         else:
-            # 수량이 0이거나 평균 매수가가 없으면 초기화
+            self.total_value = Decimal('0')
+        
+        # 평가 손익: 시세와 평균매수가가 모두 있을 때만 계산
+        if (
+            self.quantity > 0
+            and self.average_price
+            and self.average_price > 0
+            and self.current_price
+            and self.current_price > 0
+        ):
+            cost = self.quantity * self.average_price
+            value = self.quantity * self.current_price
+            self.profit_loss = value - cost
+            self.profit_rate = ((value - cost) / cost) * 100 if cost > 0 else Decimal('0')
+        else:
             self.profit_loss = Decimal('0')
             self.profit_rate = Decimal('0')
         
@@ -609,6 +599,325 @@ class TargetAllocationPlan(models.Model):
             from datetime import timedelta
             self.end_date = self.start_date + timedelta(days=self.total_days)
         super().save(*args, **kwargs)
+
+
+def generate_webhook_token():
+    """AlertStrategy webhook_token 기본값"""
+    import secrets
+    return secrets.token_urlsafe(32)
+
+
+class AlertEventStatus(models.TextChoices):
+    """TradingView 알림 이벤트 상태"""
+    RECEIVED = 'RECEIVED', '수신'
+    ACCEPTED = 'ACCEPTED', '수락'
+    REJECTED = 'REJECTED', '거부'
+    EXECUTING = 'EXECUTING', '실행중'
+    COMPLETED = 'COMPLETED', '완료'
+    FAILED = 'FAILED', '실패'
+
+
+class AlertTradeStatus(models.TextChoices):
+    """Alert 분할 매매 Plan/Leg 상태"""
+    PENDING = 'PENDING', '대기'
+    SCHEDULED = 'SCHEDULED', '예약'
+    ORDERED = 'ORDERED', '주문생성'
+    COMPLETED = 'COMPLETED', '완료'
+    CANCELLED = 'CANCELLED', '취소'
+    FAILED = 'FAILED', '실패'
+    SKIPPED = 'SKIPPED', '스킵'
+
+
+class AlertStrategy(models.Model):
+    """
+    TradingView webhook 기반 매수/매도 전략.
+    고정 시드 금액의 N%로 사이징하고, 보유 비중을 검사한 뒤 분할 실행한다.
+    """
+    account = models.ForeignKey(
+        Account,
+        on_delete=models.CASCADE,
+        related_name='alert_strategies',
+        verbose_name='계좌'
+    )
+    name = models.CharField(max_length=100, verbose_name='전략명')
+    webhook_token = models.CharField(
+        max_length=64,
+        unique=True,
+        default=generate_webhook_token,
+        verbose_name='웹훅 토큰',
+        help_text='URL path에 사용되는 고유 시크릿'
+    )
+    webhook_passphrase = models.CharField(
+        max_length=128,
+        blank=True,
+        null=True,
+        verbose_name='웹훅 패스프레이즈',
+        help_text='payload secret과 일치해야 함 (비우면 미검증)'
+    )
+    seed_amount = models.DecimalField(
+        max_digits=20,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.01'))],
+        verbose_name='고정 시드 금액'
+    )
+    seed_currency = models.CharField(
+        max_length=10,
+        choices=Currency.choices,
+        default=Currency.KRW,
+        verbose_name='시드 통화'
+    )
+    buy_seed_percent = models.DecimalField(
+        max_digits=8,
+        decimal_places=4,
+        validators=[MinValueValidator(Decimal('0.0001')), MaxValueValidator(Decimal('100'))],
+        verbose_name='매수 시드 비율 (%)',
+        help_text='시드 금액 대비 매수 금액 비율'
+    )
+    sell_seed_percent = models.DecimalField(
+        max_digits=8,
+        decimal_places=4,
+        validators=[MinValueValidator(Decimal('0.0001')), MaxValueValidator(Decimal('100'))],
+        verbose_name='매도 시드 비율 (%)',
+        help_text='시드 금액 대비 매도 금액 비율 (보유 수량으로 캡)'
+    )
+    max_position_weight_percent = models.DecimalField(
+        max_digits=8,
+        decimal_places=4,
+        default=Decimal('100'),
+        validators=[MinValueValidator(Decimal('0.0001')), MaxValueValidator(Decimal('100'))],
+        verbose_name='최대 포지션 비중 (%)',
+        help_text='시드 대비 종목 최대 보유 비중 (매수 상한)'
+    )
+    min_sell_holding_percent = models.DecimalField(
+        max_digits=8,
+        decimal_places=4,
+        blank=True,
+        null=True,
+        validators=[MinValueValidator(Decimal('0')), MaxValueValidator(Decimal('100'))],
+        verbose_name='최소 매도 보유 비중 (%)',
+        help_text='보유 평가액이 시드 대비 이 비중 미만이면 매도 스킵 (선택)'
+    )
+    split_count = models.PositiveIntegerField(
+        default=1,
+        validators=[MinValueValidator(1)],
+        verbose_name='분할 횟수',
+        help_text='1이면 일시 전량'
+    )
+    split_interval_seconds = models.PositiveIntegerField(
+        default=0,
+        verbose_name='분할 간격 (초)',
+        help_text='분할 횟수가 1보다 클 때 Leg 간 대기 시간'
+    )
+    order_type = models.CharField(
+        max_length=10,
+        choices=OrderType.choices,
+        default=OrderType.MARKET,
+        verbose_name='주문 타입'
+    )
+    enabled = models.BooleanField(default=True, verbose_name='활성 여부')
+    allowed_tickers = models.JSONField(
+        blank=True,
+        null=True,
+        verbose_name='허용 티커 목록',
+        help_text='null/빈 목록이면 브로커 Symbol만 있으면 OK'
+    )
+    cooldown_seconds = models.PositiveIntegerField(
+        default=60,
+        verbose_name='동일 티커 쿨다운 (초)',
+        help_text='동일 전략·티커·액션 중복 알림 완화'
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='생성일시')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='수정일시')
+
+    class Meta:
+        verbose_name = '알림 전략'
+        verbose_name_plural = '알림 전략들'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.name} ({self.account})"
+
+
+class AlertEvent(models.Model):
+    """TradingView webhook 수신 이벤트 (감사/재처리용)"""
+    strategy = models.ForeignKey(
+        AlertStrategy,
+        on_delete=models.CASCADE,
+        related_name='events',
+        verbose_name='전략'
+    )
+    raw_payload = models.JSONField(verbose_name='원본 페이로드')
+    ticker = models.CharField(max_length=50, blank=True, default='', verbose_name='티커')
+    action = models.CharField(
+        max_length=10,
+        choices=OrderSide.choices,
+        blank=True,
+        default='',
+        verbose_name='액션'
+    )
+    idempotency_key = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        verbose_name='멱등 키'
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=AlertEventStatus.choices,
+        default=AlertEventStatus.RECEIVED,
+        verbose_name='상태'
+    )
+    reject_reason = models.TextField(blank=True, null=True, verbose_name='거부 사유')
+    received_at = models.DateTimeField(auto_now_add=True, verbose_name='수신일시')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='수정일시')
+
+    class Meta:
+        verbose_name = '알림 이벤트'
+        verbose_name_plural = '알림 이벤트들'
+        ordering = ['-received_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['strategy', 'idempotency_key'],
+                condition=models.Q(idempotency_key__isnull=False),
+                name='unique_alert_event_idempotency'
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.strategy.name} {self.action} {self.ticker} [{self.status}]"
+
+
+class AlertTradePlan(models.Model):
+    """알림 기반 분할 매매 계획"""
+    event = models.OneToOneField(
+        AlertEvent,
+        on_delete=models.CASCADE,
+        related_name='trade_plan',
+        verbose_name='이벤트'
+    )
+    account = models.ForeignKey(
+        Account,
+        on_delete=models.CASCADE,
+        related_name='alert_trade_plans',
+        verbose_name='계좌'
+    )
+    symbol = models.ForeignKey(
+        Symbol,
+        on_delete=models.CASCADE,
+        related_name='alert_trade_plans',
+        verbose_name='종목'
+    )
+    side = models.CharField(
+        max_length=10,
+        choices=OrderSide.choices,
+        verbose_name='매수/매도'
+    )
+    total_notional = models.DecimalField(
+        max_digits=20,
+        decimal_places=2,
+        default=0,
+        validators=[MinValueValidator(0)],
+        verbose_name='총 금액'
+    )
+    total_quantity = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        blank=True,
+        null=True,
+        validators=[MinValueValidator(0)],
+        verbose_name='총 수량 (매도)'
+    )
+    reference_price = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        blank=True,
+        null=True,
+        validators=[MinValueValidator(0)],
+        verbose_name='기준가'
+    )
+    split_count = models.PositiveIntegerField(verbose_name='분할 횟수')
+    split_interval_seconds = models.PositiveIntegerField(default=0, verbose_name='분할 간격 (초)')
+    order_type = models.CharField(
+        max_length=10,
+        choices=OrderType.choices,
+        default=OrderType.MARKET,
+        verbose_name='주문 타입'
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=AlertTradeStatus.choices,
+        default=AlertTradeStatus.PENDING,
+        verbose_name='상태'
+    )
+    legs_done = models.PositiveIntegerField(default=0, verbose_name='완료된 Leg 수')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='생성일시')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='수정일시')
+
+    class Meta:
+        verbose_name = '알림 매매 계획'
+        verbose_name_plural = '알림 매매 계획들'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Plan {self.id}: {self.side} {self.symbol.ticker} ({self.legs_done}/{self.split_count})"
+
+
+class AlertTradeLeg(models.Model):
+    """알림 분할 매매 개별 Leg"""
+    plan = models.ForeignKey(
+        AlertTradePlan,
+        on_delete=models.CASCADE,
+        related_name='legs',
+        verbose_name='계획'
+    )
+    seq = models.PositiveIntegerField(verbose_name='순번')
+    scheduled_at = models.DateTimeField(verbose_name='예약 시각')
+    notional = models.DecimalField(
+        max_digits=20,
+        decimal_places=2,
+        default=0,
+        validators=[MinValueValidator(0)],
+        verbose_name='금액'
+    )
+    quantity = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        blank=True,
+        null=True,
+        validators=[MinValueValidator(0)],
+        verbose_name='수량'
+    )
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='alert_trade_legs',
+        verbose_name='주문'
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=AlertTradeStatus.choices,
+        default=AlertTradeStatus.SCHEDULED,
+        verbose_name='상태'
+    )
+    error_message = models.TextField(blank=True, null=True, verbose_name='오류 메시지')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='생성일시')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='수정일시')
+
+    class Meta:
+        verbose_name = '알림 매매 Leg'
+        verbose_name_plural = '알림 매매 Legs'
+        ordering = ['plan', 'seq']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['plan', 'seq'],
+                name='unique_alert_trade_leg_seq'
+            ),
+        ]
+
+    def __str__(self):
+        return f"Leg {self.plan_id}-{self.seq} [{self.status}]"
 
 
 class ExchangeFeeRebate(models.Model):

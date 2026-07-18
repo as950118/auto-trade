@@ -1,0 +1,224 @@
+"""
+Alert 전략 전용 사이징: 고정 시드 금액의 N% + 보유 비중 캡.
+수동 주문의 buy_quantity/sell_quantity와 분리한다.
+"""
+from dataclasses import dataclass
+from decimal import Decimal, ROUND_DOWN
+from typing import List, Optional, Tuple
+
+from .models import Account, AlertStrategy, Holding, OrderSide, Symbol
+
+
+ZERO = Decimal('0')
+QTY_QUANT = Decimal('0.00000001')
+MONEY_QUANT = Decimal('0.01')
+
+
+class AlertSizingError(Exception):
+    """사이징/비중 검증 실패"""
+
+    def __init__(self, code: str, message: str):
+        self.code = code
+        self.message = message
+        super().__init__(message)
+
+
+@dataclass
+class SizingResult:
+    side: str
+    notional: Decimal
+    quantity: Optional[Decimal]
+    reference_price: Decimal
+    position_value: Decimal
+    current_weight_percent: Decimal
+
+
+def _get_cash_balance(account: Account, currency: str) -> Decimal:
+    if currency == 'KRW':
+        return account.cash_balance_krw or ZERO
+    if currency in ('USD', 'USDT'):
+        return account.cash_balance_usd or ZERO
+    return account.cash_balance_krw or ZERO
+
+
+def get_holding(account: Account, symbol: Symbol) -> Optional[Holding]:
+    try:
+        return Holding.objects.get(account=account, symbol=symbol)
+    except Holding.DoesNotExist:
+        return None
+
+
+def resolve_reference_price(holding: Optional[Holding], fallback: Optional[Decimal] = None) -> Decimal:
+    if holding and holding.current_price and holding.current_price > 0:
+        return Decimal(str(holding.current_price))
+    if holding and holding.average_price and holding.average_price > 0:
+        return Decimal(str(holding.average_price))
+    if fallback is not None and fallback > 0:
+        return Decimal(str(fallback))
+    raise AlertSizingError('NO_PRICE', '기준 가격을 확인할 수 없습니다.')
+
+
+def position_value_of(holding: Optional[Holding], price: Decimal) -> Decimal:
+    if not holding or holding.quantity <= 0:
+        return ZERO
+    return (holding.quantity * price).quantize(MONEY_QUANT, rounding=ROUND_DOWN)
+
+
+def size_alert_trade(
+    strategy: AlertStrategy,
+    account: Account,
+    symbol: Symbol,
+    side: str,
+    reference_price: Optional[Decimal] = None,
+) -> SizingResult:
+    """
+    시드% 기준으로 매수/매도 notional·quantity를 산정하고 비중 가드를 적용한다.
+    """
+    if strategy.seed_amount <= 0:
+        raise AlertSizingError('INVALID_SEED', '시드 금액이 올바르지 않습니다.')
+
+    holding = get_holding(account, symbol)
+    price = resolve_reference_price(holding, reference_price)
+    position_value = position_value_of(holding, price)
+    current_weight = (position_value / strategy.seed_amount * 100).quantize(
+        Decimal('0.0001'), rounding=ROUND_DOWN
+    )
+
+    if side == OrderSide.BUY:
+        return _size_buy(strategy, account, symbol, price, position_value, current_weight)
+    if side == OrderSide.SELL:
+        return _size_sell(strategy, holding, price, position_value, current_weight)
+    raise AlertSizingError('INVALID_ACTION', f'지원하지 않는 액션: {side}')
+
+
+def _size_buy(
+    strategy: AlertStrategy,
+    account: Account,
+    symbol: Symbol,
+    price: Decimal,
+    position_value: Decimal,
+    current_weight: Decimal,
+) -> SizingResult:
+    buy_notional = (
+        strategy.seed_amount * strategy.buy_seed_percent / Decimal('100')
+    ).quantize(MONEY_QUANT, rounding=ROUND_DOWN)
+
+    max_value = (
+        strategy.seed_amount * strategy.max_position_weight_percent / Decimal('100')
+    ).quantize(MONEY_QUANT, rounding=ROUND_DOWN)
+    remaining_capacity = max(ZERO, max_value - position_value)
+
+    if remaining_capacity <= 0:
+        raise AlertSizingError('MAX_WEIGHT_REACHED', '최대 포지션 비중에 도달했습니다.')
+
+    if buy_notional > remaining_capacity:
+        buy_notional = remaining_capacity
+
+    cash = _get_cash_balance(account, strategy.seed_currency or symbol.currency)
+    if cash <= 0:
+        raise AlertSizingError('INSUFFICIENT_CASH', '매수 가능한 예수금이 없습니다.')
+    if buy_notional > cash:
+        buy_notional = cash.quantize(MONEY_QUANT, rounding=ROUND_DOWN)
+
+    if account.investment_limit is not None and buy_notional > account.investment_limit:
+        buy_notional = Decimal(str(account.investment_limit)).quantize(
+            MONEY_QUANT, rounding=ROUND_DOWN
+        )
+
+    if buy_notional <= 0:
+        raise AlertSizingError('ZERO_NOTIONAL', '매수 금액이 0입니다.')
+
+    quantity = (buy_notional / price).quantize(QTY_QUANT, rounding=ROUND_DOWN)
+    if quantity <= 0:
+        raise AlertSizingError('ZERO_QUANTITY', '계산된 매수 수량이 0입니다.')
+
+    return SizingResult(
+        side=OrderSide.BUY,
+        notional=buy_notional,
+        quantity=quantity,
+        reference_price=price,
+        position_value=position_value,
+        current_weight_percent=current_weight,
+    )
+
+
+def _size_sell(
+    strategy: AlertStrategy,
+    holding: Optional[Holding],
+    price: Decimal,
+    position_value: Decimal,
+    current_weight: Decimal,
+) -> SizingResult:
+    if not holding or holding.quantity <= 0:
+        raise AlertSizingError('NO_HOLDING', '해당 종목을 보유하고 있지 않습니다.')
+
+    if strategy.min_sell_holding_percent is not None:
+        min_value = (
+            strategy.seed_amount * strategy.min_sell_holding_percent / Decimal('100')
+        )
+        if position_value < min_value:
+            raise AlertSizingError(
+                'BELOW_MIN_HOLDING_WEIGHT',
+                f'보유 비중({current_weight}%)이 최소 매도 비중 '
+                f'({strategy.min_sell_holding_percent}%) 미만입니다.',
+            )
+
+    sell_notional = (
+        strategy.seed_amount * strategy.sell_seed_percent / Decimal('100')
+    ).quantize(MONEY_QUANT, rounding=ROUND_DOWN)
+
+    sell_qty = (sell_notional / price).quantize(QTY_QUANT, rounding=ROUND_DOWN)
+    sell_qty = min(sell_qty, holding.quantity)
+
+    if sell_qty <= 0:
+        raise AlertSizingError('NOTHING_TO_SELL', '매도 가능한 수량이 없습니다.')
+
+    actual_notional = (sell_qty * price).quantize(MONEY_QUANT, rounding=ROUND_DOWN)
+
+    return SizingResult(
+        side=OrderSide.SELL,
+        notional=actual_notional,
+        quantity=sell_qty,
+        reference_price=price,
+        position_value=position_value,
+        current_weight_percent=current_weight,
+    )
+
+
+def split_amounts(
+    total_notional: Decimal,
+    total_quantity: Optional[Decimal],
+    split_count: int,
+) -> List[Tuple[Decimal, Optional[Decimal]]]:
+    """N등분. 마지막 Leg에 잔여 보정."""
+    if split_count < 1:
+        raise AlertSizingError('INVALID_SPLIT', '분할 횟수는 1 이상이어야 합니다.')
+
+    parts: List[Tuple[Decimal, Optional[Decimal]]] = []
+    if total_quantity is not None:
+        base_qty = (total_quantity / split_count).quantize(QTY_QUANT, rounding=ROUND_DOWN)
+        allocated_qty = ZERO
+        base_notional = (total_notional / split_count).quantize(MONEY_QUANT, rounding=ROUND_DOWN)
+        allocated_notional = ZERO
+        for i in range(split_count):
+            if i == split_count - 1:
+                qty = total_quantity - allocated_qty
+                notional = total_notional - allocated_notional
+            else:
+                qty = base_qty
+                notional = base_notional
+                allocated_qty += qty
+                allocated_notional += notional
+            parts.append((notional, qty))
+        return parts
+
+    base_notional = (total_notional / split_count).quantize(MONEY_QUANT, rounding=ROUND_DOWN)
+    allocated = ZERO
+    for i in range(split_count):
+        if i == split_count - 1:
+            notional = total_notional - allocated
+        else:
+            notional = base_notional
+            allocated += notional
+        parts.append((notional, None))
+    return parts

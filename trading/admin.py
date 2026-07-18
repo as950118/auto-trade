@@ -1,5 +1,8 @@
 from django.contrib import admin
-from .models import Broker, Symbol, Account, Order, Holding, TargetAllocationPlan, ExchangeFeeRebate
+from .models import (
+    Broker, Symbol, Account, Order, Holding, TargetAllocationPlan, ExchangeFeeRebate,
+    AlertStrategy, AlertEvent, AlertTradePlan, AlertTradeLeg,
+)
 
 
 @admin.register(Broker)
@@ -130,3 +133,45 @@ class ExchangeFeeRebateAdmin(admin.ModelAdmin):
     list_filter = ['is_active', 'crawled_at']
     search_fields = ['exchange_name']
     list_editable = ['is_active']
+
+
+@admin.register(AlertStrategy)
+class AlertStrategyAdmin(admin.ModelAdmin):
+    list_display = [
+        'name', 'account', 'seed_amount', 'seed_currency',
+        'buy_seed_percent', 'sell_seed_percent', 'max_position_weight_percent',
+        'split_count', 'enabled', 'created_at',
+    ]
+    list_filter = ['enabled', 'seed_currency', 'order_type']
+    search_fields = ['name', 'account__user__username', 'webhook_token']
+    readonly_fields = ['webhook_token', 'created_at', 'updated_at']
+    list_editable = ['enabled']
+
+
+@admin.register(AlertEvent)
+class AlertEventAdmin(admin.ModelAdmin):
+    list_display = [
+        'id', 'strategy', 'ticker', 'action', 'status',
+        'idempotency_key', 'received_at',
+    ]
+    list_filter = ['status', 'action', 'received_at']
+    search_fields = ['ticker', 'idempotency_key', 'strategy__name']
+    readonly_fields = ['raw_payload', 'received_at', 'updated_at']
+
+
+class AlertTradeLegInline(admin.TabularInline):
+    model = AlertTradeLeg
+    extra = 0
+    readonly_fields = ['seq', 'scheduled_at', 'notional', 'quantity', 'order', 'status', 'error_message']
+
+
+@admin.register(AlertTradePlan)
+class AlertTradePlanAdmin(admin.ModelAdmin):
+    list_display = [
+        'id', 'account', 'symbol', 'side', 'total_notional', 'total_quantity',
+        'split_count', 'legs_done', 'status', 'created_at',
+    ]
+    list_filter = ['status', 'side', 'created_at']
+    search_fields = ['symbol__ticker', 'account__user__username']
+    inlines = [AlertTradeLegInline]
+    readonly_fields = ['legs_done', 'created_at', 'updated_at']
