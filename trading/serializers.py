@@ -2,7 +2,11 @@ from rest_framework import serializers
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
-from .models import Order, Account, Symbol, Broker, DailyRealizedProfit, Holding, TargetAllocationPlan, ExchangeFeeRebate
+from .models import (
+    Order, Account, Symbol, Broker, DailyRealizedProfit, Holding,
+    TargetAllocationPlan, ExchangeFeeRebate,
+    AlertStrategy, AlertEvent, AlertTradePlan, AlertTradeLeg,
+)
 from .sell_quantity import (
     resolve_sell_quantity,
     QUANTITY_TYPE_EXACT,
@@ -499,3 +503,94 @@ class ExchangeFeeRebateSerializer(serializers.ModelSerializer):
             'tags', 'source_url', 'crawled_at', 'is_active',
             'created_at', 'updated_at',
         ]
+
+
+class AlertStrategySerializer(serializers.ModelSerializer):
+    """TradingView 알림 전략 시리얼라이저"""
+    account = AccountSerializer(read_only=True)
+    account_id = serializers.PrimaryKeyRelatedField(
+        queryset=Account.objects.none(), write_only=True
+    )
+    order_type_display = serializers.CharField(source='get_order_type_display', read_only=True)
+    webhook_url = serializers.SerializerMethodField()
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            self.fields['account_id'].queryset = Account.objects.filter(user=request.user)
+
+    class Meta:
+        model = AlertStrategy
+        fields = [
+            'id', 'account', 'account_id', 'name', 'webhook_token', 'webhook_url',
+            'webhook_passphrase', 'seed_amount', 'seed_currency',
+            'buy_seed_percent', 'sell_seed_percent', 'max_position_weight_percent',
+            'min_sell_holding_percent', 'split_count', 'split_interval_seconds',
+            'order_type', 'order_type_display', 'enabled', 'allowed_tickers',
+            'cooldown_seconds', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'webhook_token', 'created_at', 'updated_at']
+        extra_kwargs = {
+            'webhook_passphrase': {'write_only': True, 'required': False, 'allow_null': True},
+        }
+
+    def get_webhook_url(self, obj):
+        request = self.context.get('request')
+        path = f'/api/webhooks/tradingview/{obj.webhook_token}/'
+        if request:
+            return request.build_absolute_uri(path)
+        return path
+
+    def create(self, validated_data):
+        validated_data['account'] = validated_data.pop('account_id')
+        return AlertStrategy.objects.create(**validated_data)
+
+    def update(self, instance, validated_data):
+        if 'account_id' in validated_data:
+            validated_data['account'] = validated_data.pop('account_id')
+        return super().update(instance, validated_data)
+
+
+class AlertTradeLegSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AlertTradeLeg
+        fields = [
+            'id', 'seq', 'scheduled_at', 'notional', 'quantity',
+            'order', 'status', 'error_message', 'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
+
+
+class AlertTradePlanSerializer(serializers.ModelSerializer):
+    account = AccountSerializer(read_only=True)
+    symbol = SymbolSerializer(read_only=True)
+    legs = AlertTradeLegSerializer(many=True, read_only=True)
+    side_display = serializers.CharField(source='get_side_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+
+    class Meta:
+        model = AlertTradePlan
+        fields = [
+            'id', 'event', 'account', 'symbol', 'side', 'side_display',
+            'total_notional', 'total_quantity', 'reference_price',
+            'split_count', 'split_interval_seconds', 'order_type',
+            'status', 'status_display', 'legs_done', 'legs',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
+
+
+class AlertEventSerializer(serializers.ModelSerializer):
+    strategy_name = serializers.CharField(source='strategy.name', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    trade_plan = AlertTradePlanSerializer(read_only=True)
+
+    class Meta:
+        model = AlertEvent
+        fields = [
+            'id', 'strategy', 'strategy_name', 'raw_payload', 'ticker', 'action',
+            'idempotency_key', 'status', 'status_display', 'reject_reason',
+            'trade_plan', 'received_at', 'updated_at',
+        ]
+        read_only_fields = fields
