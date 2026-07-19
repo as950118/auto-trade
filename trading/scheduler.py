@@ -76,6 +76,16 @@ def start_scheduler():
         replace_existing=True,
     )
 
+    # TradingView Alert 분할 Leg → Order 생성
+    alert_leg_interval = getattr(settings, 'ALERT_TRADE_LEG_INTERVAL_SECONDS', 30)
+    scheduler.add_job(
+        process_alert_trade_legs_job,
+        trigger=IntervalTrigger(seconds=alert_leg_interval),
+        id='process_alert_trade_legs',
+        name='알림 분할 매매 Leg 처리',
+        replace_existing=True,
+    )
+
     # 거래소 수수료 환급(페이백) 크롤링 (기본 6시간마다)
     fee_rebate_interval_hours = getattr(settings, 'FEE_REBATE_CRAWL_INTERVAL_HOURS', 6)
     scheduler.add_job(
@@ -247,6 +257,18 @@ def run_target_allocation_job():
             f"❌ 목표 비율 자동매매 실패\n\n오류: {str(e)}",
             job_name="목표 비율 자동매매",
         )
+
+
+def process_alert_trade_legs_job():
+    """Alert 분할 매매 due Legs → Order 생성"""
+    from .services.alert_strategy import process_due_alert_trade_legs
+
+    try:
+        created = process_due_alert_trade_legs()
+        if created > 0:
+            logger.info("Alert trade legs processed: %s orders created", created)
+    except Exception as e:
+        logger.exception("Alert trade leg 처리 중 오류: %s", e)
 
 
 def crawl_fee_rebates_job():

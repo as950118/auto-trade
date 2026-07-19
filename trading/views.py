@@ -12,17 +12,19 @@ from django.db.models import Q
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from decimal import Decimal
-from .models import Order, Account, Symbol, Broker, Country, OrderStatus, DailyRealizedProfit, Holding, TargetAllocationPlan, ExchangeFeeRebate
+from .models import Order, Account, Symbol, Broker, Country, OrderStatus, DailyRealizedProfit, Holding, TargetAllocationPlan, ExchangeFeeRebate, AlertStrategy, AlertEvent, AlertTradePlan
 from .serializers import (
     OrderCreateSerializer, OrderSerializer, OrderUpdateSerializer,
     AccountSerializer, SymbolSerializer, DailyRealizedProfitSerializer,
     UserSerializer, MeSerializer, SetPasswordSerializer,
     BrokerSerializer, HoldingSerializer, TargetAllocationPlanSerializer,
     ExchangeFeeRebateSerializer,
+    AlertStrategySerializer, AlertEventSerializer, AlertTradePlanSerializer,
 )
 from .profit_calculator import ProfitCalculator
 from datetime import date as date_type
 from .views_profit import DailyRealizedProfitViewSet
+import secrets
 
 
 @extend_schema(
@@ -661,3 +663,68 @@ class ExchangeFeeRebateViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         return ExchangeFeeRebate.objects.filter(is_active=True)
+
+
+class AlertStrategyViewSet(viewsets.ModelViewSet):
+    """TradingView 알림 전략 CRUD"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = AlertStrategySerializer
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filterset_fields = ['account', 'enabled']
+    ordering_fields = ['created_at', 'name']
+    ordering = ['-created_at']
+
+    def get_queryset(self):
+        return AlertStrategy.objects.filter(account__user=self.request.user).select_related(
+            'account', 'account__broker'
+        )
+
+    def perform_create(self, serializer):
+        account = serializer.validated_data.get('account_id') or serializer.validated_data.get('account')
+        if account and account.user != self.request.user:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('본인 계좌만 등록할 수 있습니다.')
+        serializer.save()
+
+    @action(detail=True, methods=['post'])
+    def regenerate_token(self, request, pk=None):
+        """웹훅 토큰 재발급"""
+        strategy = self.get_object()
+        strategy.webhook_token = secrets.token_urlsafe(32)
+        strategy.save(update_fields=['webhook_token', 'updated_at'])
+        serializer = self.get_serializer(strategy)
+        return Response(serializer.data)
+
+
+class AlertEventViewSet(viewsets.ReadOnlyModelViewSet):
+    """알림 이벤트 조회"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = AlertEventSerializer
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filterset_fields = ['strategy', 'status', 'action', 'ticker']
+    ordering_fields = ['received_at']
+    ordering = ['-received_at']
+
+    def get_queryset(self):
+        qs = AlertEvent.objects.filter(
+            strategy__account__user=self.request.user
+        ).select_related('strategy', 'trade_plan', 'trade_plan__symbol', 'trade_plan__account')
+        strategy_id = self.request.query_params.get('strategy_id')
+        if strategy_id:
+            qs = qs.filter(strategy_id=strategy_id)
+        return qs
+
+
+class AlertTradePlanViewSet(viewsets.ReadOnlyModelViewSet):
+    """알림 매매 계획 조회"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = AlertTradePlanSerializer
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filterset_fields = ['account', 'symbol', 'side', 'status']
+    ordering_fields = ['created_at']
+    ordering = ['-created_at']
+
+    def get_queryset(self):
+        return AlertTradePlan.objects.filter(
+            account__user=self.request.user
+        ).select_related('account', 'symbol', 'event').prefetch_related('legs')

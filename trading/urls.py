@@ -2,20 +2,12 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from .views import (
-    OrderViewSet,
-    AccountViewSet,
-    SymbolViewSet,
-    DailyRealizedProfitViewSet,
-    BrokerViewSet,
-    HoldingViewSet,
-    TargetAllocationPlanViewSet,
-    ExchangeFeeRebateViewSet,
-    signup,
-    me,
-    set_password,
-    google_oauth2_login,
-    google_oauth2_callback,
+    OrderViewSet, AccountViewSet, SymbolViewSet, DailyRealizedProfitViewSet,
+    BrokerViewSet, HoldingViewSet, TargetAllocationPlanViewSet, ExchangeFeeRebateViewSet,
+    AlertStrategyViewSet, AlertEventViewSet, AlertTradePlanViewSet, signup,
 )
+from .oauth2_views import google_oauth2_login, google_oauth2_callback
+from .webhooks import tradingview_webhook
 
 router = DefaultRouter()
 router.register(r'accounts', AccountViewSet, basename='account')
@@ -26,12 +18,13 @@ router.register(r'holdings', HoldingViewSet, basename='holding')
 router.register(r'target-allocation-plans', TargetAllocationPlanViewSet, basename='target-allocation-plan')
 router.register(r'daily-profits', DailyRealizedProfitViewSet, basename='daily-profit')
 router.register(r'fee-rebates', ExchangeFeeRebateViewSet, basename='fee-rebate')
+router.register(r'alert-strategies', AlertStrategyViewSet, basename='alert-strategy')
+router.register(r'alert-events', AlertEventViewSet, basename='alert-event')
+router.register(r'alert-trade-plans', AlertTradePlanViewSet, basename='alert-trade-plan')
 
 urlpatterns = [
-    # 회원가입 / 프로필
+    # 회원가입
     path('api/users/', signup, name='signup'),
-    path('api/users/me/', me, name='me'),
-    path('api/users/me/password/', set_password, name='set-password'),
     
     # JWT 인증
     path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
@@ -40,6 +33,13 @@ urlpatterns = [
     # Google OAuth2
     path('api/oauth2/google/login/', google_oauth2_login),
     path('api/oauth2/google/callback/', google_oauth2_callback),
+
+    # TradingView webhook (공개)
+    path(
+        'api/webhooks/tradingview/<str:webhook_token>/',
+        tradingview_webhook,
+        name='tradingview-webhook',
+    ),
 
     # API 라우터
     path('api/', include(router.urls)),
