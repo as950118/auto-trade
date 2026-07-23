@@ -1,12 +1,12 @@
 """
-TradingView Alert → Event 저장 → 검증/사이징 → TradePlan/Legs 생성.
+TradingView Alert → Event 저장 → 활성 StrategyLink fan-out → TradePlan/Legs 생성.
 """
 import hashlib
 import json
 import logging
 from datetime import timedelta
 from decimal import Decimal
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from django.db import IntegrityError, transaction
 from django.utils import timezone
@@ -20,11 +20,15 @@ from ..alert_guards import (
     ensure_ticker_allowed,
     resolve_symbol,
 )
-from ..alert_sizing import AlertSizingError, size_alert_trade, split_amounts
+from ..alert_sizing import (
+    AlertSizingError,
+    config_from_link,
+    size_alert_trade,
+    split_amounts,
+)
 from ..models import (
     AlertEvent,
     AlertEventStatus,
-    AlertStrategy,
     AlertTradeLeg,
     AlertTradePlan,
     AlertTradeStatus,
@@ -32,15 +36,15 @@ from ..models import (
     OrderSide,
     OrderStatus,
     OrderType,
+    Strategy,
+    StrategyLink,
 )
 
 logger = logging.getLogger(__name__)
 
 
 def parse_tradingview_payload(payload: Dict[str, Any]) -> Tuple[str, str, Optional[str], Optional[str], Optional[Decimal]]:
-    """
-    Returns: ticker, action, passphrase, idempotency_key, price
-    """
+    """Returns: ticker, action, passphrase, idempotency_key, price"""
     ticker = (
         payload.get('ticker')
         or payload.get('symbol')
@@ -85,7 +89,6 @@ def parse_tradingview_payload(payload: Dict[str, Any]) -> Tuple[str, str, Option
 
 
 def _fallback_idempotency_key(strategy_id: int, payload: Dict[str, Any]) -> str:
-    """alert_id가 없을 때 payload 해시 + 분 단위 버킷으로 약한 멱등 키 생성."""
     minute_bucket = timezone.now().strftime('%Y%m%d%H%M')
     raw = json.dumps(payload, sort_keys=True, default=str)
     digest = hashlib.sha256(f'{strategy_id}:{minute_bucket}:{raw}'.encode()).hexdigest()[:32]
@@ -93,7 +96,7 @@ def _fallback_idempotency_key(strategy_id: int, payload: Dict[str, Any]) -> str:
 
 
 class AlertStrategyService:
-    """Webhook 처리 및 Plan/Leg 생성"""
+    """Webhook 처리 및 Link fan-out Plan/Leg 생성"""
 
     @classmethod
     def handle_webhook(
@@ -102,17 +105,14 @@ class AlertStrategyService:
         payload: Dict[str, Any],
     ) -> AlertEvent:
         try:
-            strategy = AlertStrategy.objects.select_related(
-                'account', 'account__broker'
-            ).get(webhook_token=webhook_token)
-        except AlertStrategy.DoesNotExist:
+            strategy = Strategy.objects.select_related('owner').get(webhook_token=webhook_token)
+        except Strategy.DoesNotExist:
             raise AlertGuardError('STRATEGY_NOT_FOUND', '전략을 찾을 수 없습니다.')
 
         ticker, action, passphrase, idempotency_key, price = parse_tradingview_payload(payload)
         if not idempotency_key:
             idempotency_key = _fallback_idempotency_key(strategy.id, payload)
 
-        # Idempotent short-circuit
         existing = AlertEvent.objects.filter(
             strategy=strategy,
             idempotency_key=idempotency_key,
@@ -174,7 +174,7 @@ class AlertStrategyService:
     def _process_event(
         cls,
         event: AlertEvent,
-        strategy: AlertStrategy,
+        strategy: Strategy,
         passphrase: Optional[str],
         payload_price: Optional[Decimal] = None,
     ) -> None:
@@ -184,43 +184,95 @@ class AlertStrategyService:
         if event.action not in (OrderSide.BUY, OrderSide.SELL):
             raise AlertGuardError('INVALID_ACTION', f'유효하지 않은 action: {event.action}')
 
-        account = strategy.account
-        ensure_account_side_enabled(account, event.action)
         ensure_ticker_allowed(strategy, event.ticker)
-        symbol = resolve_symbol(account, event.ticker)
-        ensure_cooldown(strategy, symbol.ticker, event.action)
+        ensure_cooldown(strategy, event.ticker, event.action, exclude_event_id=event.id)
 
+        links = list(
+            StrategyLink.objects.filter(
+                strategy=strategy,
+                enabled=True,
+            ).select_related('account', 'account__broker', 'strategy')
+        )
+        if not links:
+            raise AlertGuardError('NO_ACTIVE_LINKS', '활성 연동 계좌가 없습니다.')
+
+        successes = 0
+        failures: List[str] = []
+        resolved_ticker = event.ticker
+
+        for link in links:
+            try:
+                cls._process_link(event, strategy, link, payload_price)
+                successes += 1
+                if event.ticker:
+                    resolved_ticker = event.ticker
+            except (AlertGuardError, AlertSizingError) as exc:
+                msg = f'link={link.id} account={link.account_id}: [{exc.code}] {exc.message}'
+                failures.append(msg)
+                logger.warning('Alert link rejected: %s', msg)
+            except Exception as exc:
+                msg = f'link={link.id} account={link.account_id}: {exc}'
+                failures.append(msg)
+                logger.exception('Alert link failed: %s', msg)
+
+        if successes == 0:
+            event.status = AlertEventStatus.REJECTED
+            event.reject_reason = '; '.join(failures)[:2000]
+            event.save(update_fields=['status', 'reject_reason', 'updated_at'])
+            return
+
+        event.ticker = resolved_ticker
+        event.status = AlertEventStatus.ACCEPTED
+        if failures:
+            event.reject_reason = f'partial: {"; ".join(failures)}'[:2000]
+        else:
+            event.reject_reason = None
+        event.save(update_fields=['ticker', 'status', 'reject_reason', 'updated_at'])
+
+    @classmethod
+    def _process_link(
+        cls,
+        event: AlertEvent,
+        strategy: Strategy,
+        link: StrategyLink,
+        payload_price: Optional[Decimal],
+    ) -> AlertTradePlan:
+        account = link.account
+        ensure_account_side_enabled(account, event.action)
+        symbol = resolve_symbol(account, event.ticker)
         reference_price = cls._resolve_reference_price(account, symbol, payload_price)
+        config = config_from_link(link)
 
         sizing = size_alert_trade(
-            strategy=strategy,
+            config=config,
             account=account,
             symbol=symbol,
             side=event.action,
             reference_price=reference_price,
         )
 
-        cls._create_plan_and_legs(
+        plan = cls._create_plan_and_legs(
             event=event,
-            strategy=strategy,
+            link=link,
             account=account,
             symbol=symbol,
             sizing=sizing,
+            config=config,
+            order_type=strategy.order_type or OrderType.MARKET,
         )
-
         event.ticker = symbol.ticker
-        event.status = AlertEventStatus.ACCEPTED
-        event.save(update_fields=['ticker', 'status', 'updated_at'])
+        return plan
 
     @classmethod
-    def _create_plan_and_legs(cls, event, strategy, account, symbol, sizing) -> AlertTradePlan:
-        split_count = max(1, int(strategy.split_count or 1))
-        interval = int(strategy.split_interval_seconds or 0)
+    def _create_plan_and_legs(cls, event, link, account, symbol, sizing, config, order_type) -> AlertTradePlan:
+        split_count = max(1, int(config.split_count or 1))
+        interval = int(config.split_interval_seconds or 0)
         parts = split_amounts(sizing.notional, sizing.quantity, split_count)
         now = timezone.now()
 
         plan = AlertTradePlan.objects.create(
             event=event,
+            strategy_link=link,
             account=account,
             symbol=symbol,
             side=sizing.side,
@@ -229,7 +281,7 @@ class AlertStrategyService:
             reference_price=sizing.reference_price,
             split_count=split_count,
             split_interval_seconds=interval,
-            order_type=strategy.order_type or OrderType.MARKET,
+            order_type=order_type,
             status=AlertTradeStatus.PENDING,
         )
 
@@ -243,10 +295,12 @@ class AlertStrategyService:
                 status=AlertTradeStatus.SCHEDULED,
             )
 
+        # 향후 수수료: 체결(FILLED) 훅이 정산 기준. Plan 생성은 통계용만.
+        from ..strategy_fees import on_strategy_plan_created
+        on_strategy_plan_created(plan, link)
+
         event.status = AlertEventStatus.EXECUTING
         event.save(update_fields=['status', 'updated_at'])
-        plan.status = AlertTradeStatus.PENDING
-        plan.save(update_fields=['status', 'updated_at'])
         return plan
 
 
@@ -283,7 +337,7 @@ def process_due_alert_trade_legs(now=None) -> int:
     return created
 
 
-def _create_order_for_leg(leg: AlertTradeLeg) -> Order:
+def _create_order_for_leg(leg: AlertTradeLeg) -> Optional[Order]:
     plan = leg.plan
     account = plan.account
     symbol = plan.symbol
@@ -351,22 +405,41 @@ def _refresh_plan_status(plan_id: int) -> None:
         return
 
     statuses = {leg.status for leg in legs}
-    if all(s in (AlertTradeStatus.ORDERED, AlertTradeStatus.COMPLETED, AlertTradeStatus.SKIPPED) for s in statuses):
+    terminal_ok = {AlertTradeStatus.ORDERED, AlertTradeStatus.COMPLETED, AlertTradeStatus.SKIPPED}
+    if all(s in terminal_ok for s in statuses):
         if AlertTradeStatus.FAILED in statuses:
             plan.status = AlertTradeStatus.FAILED
-            plan.event.status = AlertEventStatus.FAILED
         else:
             plan.status = AlertTradeStatus.COMPLETED
-            plan.event.status = AlertEventStatus.COMPLETED
         plan.save(update_fields=['status', 'updated_at'])
-        plan.event.save(update_fields=['status', 'updated_at'])
     elif AlertTradeStatus.FAILED in statuses and AlertTradeStatus.SCHEDULED not in statuses:
         plan.status = AlertTradeStatus.FAILED
-        plan.event.status = AlertEventStatus.FAILED
         plan.save(update_fields=['status', 'updated_at'])
-        plan.event.save(update_fields=['status', 'updated_at'])
     else:
         plan.status = AlertTradeStatus.PENDING
-        plan.event.status = AlertEventStatus.EXECUTING
         plan.save(update_fields=['status', 'updated_at'])
-        plan.event.save(update_fields=['status', 'updated_at'])
+
+    _refresh_event_status(plan.event_id)
+
+
+def _refresh_event_status(event_id: int) -> None:
+    try:
+        event = AlertEvent.objects.get(pk=event_id)
+    except AlertEvent.DoesNotExist:
+        return
+
+    plans = list(event.trade_plans.all())
+    if not plans:
+        return
+
+    plan_statuses = {p.status for p in plans}
+    if all(s == AlertTradeStatus.COMPLETED for s in plan_statuses):
+        event.status = AlertEventStatus.COMPLETED
+    elif all(s in (AlertTradeStatus.FAILED, AlertTradeStatus.COMPLETED) for s in plan_statuses):
+        if all(s == AlertTradeStatus.FAILED for s in plan_statuses):
+            event.status = AlertEventStatus.FAILED
+        else:
+            event.status = AlertEventStatus.COMPLETED
+    else:
+        event.status = AlertEventStatus.EXECUTING
+    event.save(update_fields=['status', 'updated_at'])

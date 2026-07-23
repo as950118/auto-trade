@@ -12,19 +12,20 @@ from django.db.models import Q
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from decimal import Decimal
-from .models import Order, Account, Symbol, Broker, Country, OrderStatus, DailyRealizedProfit, Holding, TargetAllocationPlan, ExchangeFeeRebate, AlertStrategy, AlertEvent, AlertTradePlan
+from .models import Order, Account, Symbol, Broker, Country, OrderStatus, DailyRealizedProfit, Holding, TargetAllocationPlan, ExchangeFeeRebate, Strategy, StrategyLink, StrategyVisibility, AlertEvent, AlertTradePlan
 from .serializers import (
     OrderCreateSerializer, OrderSerializer, OrderUpdateSerializer,
     AccountSerializer, SymbolSerializer, DailyRealizedProfitSerializer,
     UserSerializer, MeSerializer, SetPasswordSerializer,
     BrokerSerializer, HoldingSerializer, TargetAllocationPlanSerializer,
     ExchangeFeeRebateSerializer,
-    AlertStrategySerializer, AlertEventSerializer, AlertTradePlanSerializer,
+    StrategySerializer, StrategyLinkSerializer, AlertEventSerializer, AlertTradePlanSerializer,
 )
 from .profit_calculator import ProfitCalculator
 from datetime import date as date_type
 from .views_profit import DailyRealizedProfitViewSet
 import secrets
+from django.db.models import Q
 
 
 @extend_schema(
@@ -665,35 +666,62 @@ class ExchangeFeeRebateViewSet(viewsets.ReadOnlyModelViewSet):
         return ExchangeFeeRebate.objects.filter(is_active=True)
 
 
-class AlertStrategyViewSet(viewsets.ModelViewSet):
-    """TradingView 알림 전략 CRUD"""
+class StrategyViewSet(viewsets.ModelViewSet):
+    """전략 템플릿 CRUD"""
     permission_classes = [IsAuthenticated]
-    serializer_class = AlertStrategySerializer
-    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
-    filterset_fields = ['account', 'enabled']
-    ordering_fields = ['created_at', 'name']
+    serializer_class = StrategySerializer
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter, filters.SearchFilter]
+    filterset_fields = ['visibility', 'enabled', 'owner']
+    search_fields = ['title', 'description']
+    ordering_fields = ['created_at', 'title']
     ordering = ['-created_at']
 
     def get_queryset(self):
-        return AlertStrategy.objects.filter(account__user=self.request.user).select_related(
-            'account', 'account__broker'
-        )
+        user = self.request.user
+        return Strategy.objects.filter(
+            Q(visibility=StrategyVisibility.PUBLIC) | Q(owner=user)
+        ).select_related('owner')
 
     def perform_create(self, serializer):
-        account = serializer.validated_data.get('account_id') or serializer.validated_data.get('account')
-        if account and account.user != self.request.user:
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied('본인 계좌만 등록할 수 있습니다.')
         serializer.save()
+
+    def perform_update(self, serializer):
+        strategy = self.get_object()
+        if strategy.owner_id != self.request.user.id and not self.request.user.is_staff:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('본인 전략만 수정할 수 있습니다.')
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        if instance.owner_id != self.request.user.id and not self.request.user.is_staff:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('본인 전략만 삭제할 수 있습니다.')
+        instance.delete()
 
     @action(detail=True, methods=['post'])
     def regenerate_token(self, request, pk=None):
-        """웹훅 토큰 재발급"""
         strategy = self.get_object()
+        if strategy.owner_id != request.user.id and not request.user.is_staff:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('본인 전략만 토큰을 재발급할 수 있습니다.')
         strategy.webhook_token = secrets.token_urlsafe(32)
         strategy.save(update_fields=['webhook_token', 'updated_at'])
-        serializer = self.get_serializer(strategy)
-        return Response(serializer.data)
+        return Response(self.get_serializer(strategy).data)
+
+
+class StrategyLinkViewSet(viewsets.ModelViewSet):
+    """전략 연동 CRUD"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = StrategyLinkSerializer
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filterset_fields = ['strategy', 'account', 'enabled']
+    ordering_fields = ['created_at']
+    ordering = ['-created_at']
+
+    def get_queryset(self):
+        return StrategyLink.objects.filter(
+            account__user=self.request.user
+        ).select_related('strategy', 'strategy__owner', 'account', 'account__broker')
 
 
 class AlertEventViewSet(viewsets.ReadOnlyModelViewSet):
@@ -706,9 +734,12 @@ class AlertEventViewSet(viewsets.ReadOnlyModelViewSet):
     ordering = ['-received_at']
 
     def get_queryset(self):
+        user = self.request.user
         qs = AlertEvent.objects.filter(
-            strategy__account__user=self.request.user
-        ).select_related('strategy', 'trade_plan', 'trade_plan__symbol', 'trade_plan__account')
+            Q(strategy__owner=user) | Q(trade_plans__account__user=user)
+        ).distinct().select_related('strategy').prefetch_related(
+            'trade_plans', 'trade_plans__symbol', 'trade_plans__account', 'trade_plans__legs'
+        )
         strategy_id = self.request.query_params.get('strategy_id')
         if strategy_id:
             qs = qs.filter(strategy_id=strategy_id)
@@ -720,11 +751,11 @@ class AlertTradePlanViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class = AlertTradePlanSerializer
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
-    filterset_fields = ['account', 'symbol', 'side', 'status']
+    filterset_fields = ['account', 'symbol', 'side', 'status', 'strategy_link']
     ordering_fields = ['created_at']
     ordering = ['-created_at']
 
     def get_queryset(self):
         return AlertTradePlan.objects.filter(
             account__user=self.request.user
-        ).select_related('account', 'symbol', 'event').prefetch_related('legs')
+        ).select_related('account', 'symbol', 'event', 'strategy_link').prefetch_related('legs')
