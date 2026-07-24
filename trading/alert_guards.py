@@ -1,5 +1,5 @@
 """
-Alert 전략 가드: 계좌/종목/화이트리스트/쿨다운 등.
+Strategy 가드: 계좌/종목/화이트리스트/쿨다운 등.
 """
 from datetime import timedelta
 from typing import Optional
@@ -10,8 +10,8 @@ from .models import (
     Account,
     AlertEvent,
     AlertEventStatus,
-    AlertStrategy,
     OrderSide,
+    Strategy,
     Symbol,
 )
 
@@ -23,7 +23,7 @@ class AlertGuardError(Exception):
         super().__init__(message)
 
 
-def ensure_strategy_active(strategy: AlertStrategy) -> None:
+def ensure_strategy_active(strategy: Strategy) -> None:
     if not strategy.enabled:
         raise AlertGuardError('STRATEGY_DISABLED', '전략이 비활성화되어 있습니다.')
 
@@ -40,7 +40,6 @@ def resolve_symbol(account: Account, ticker: str) -> Symbol:
     if not ticker_norm:
         raise AlertGuardError('MISSING_TICKER', '티커가 없습니다.')
 
-    # TradingView may send EXCHANGE:TICKER
     if ':' in ticker_norm:
         ticker_norm = ticker_norm.split(':')[-1]
 
@@ -50,7 +49,6 @@ def resolve_symbol(account: Account, ticker: str) -> Symbol:
     )
     symbol = qs.filter(ticker__iexact=ticker_norm).first()
     if symbol is None:
-        # try without market suffix e.g. BTCUSDT vs BTC
         symbol = qs.filter(ticker__icontains=ticker_norm).first()
     if symbol is None:
         raise AlertGuardError(
@@ -60,7 +58,7 @@ def resolve_symbol(account: Account, ticker: str) -> Symbol:
     return symbol
 
 
-def ensure_ticker_allowed(strategy: AlertStrategy, ticker: str) -> None:
+def ensure_ticker_allowed(strategy: Strategy, ticker: str) -> None:
     allowed = strategy.allowed_tickers
     if not allowed:
         return
@@ -72,14 +70,14 @@ def ensure_ticker_allowed(strategy: AlertStrategy, ticker: str) -> None:
         raise AlertGuardError('TICKER_NOT_ALLOWED', f'허용되지 않은 티커입니다: {ticker}')
 
 
-def ensure_passphrase(strategy: AlertStrategy, payload_secret: Optional[str]) -> None:
+def ensure_passphrase(strategy: Strategy, payload_secret: Optional[str]) -> None:
     if not strategy.webhook_passphrase:
         return
     if not payload_secret or payload_secret != strategy.webhook_passphrase:
         raise AlertGuardError('INVALID_PASSPHRASE', '웹훅 패스프레이즈가 일치하지 않습니다.')
 
 
-def ensure_cooldown(strategy: AlertStrategy, ticker: str, action: str) -> None:
+def ensure_cooldown(strategy: Strategy, ticker: str, action: str, exclude_event_id: Optional[int] = None) -> None:
     if not strategy.cooldown_seconds or strategy.cooldown_seconds <= 0:
         return
     since = timezone.now() - timedelta(seconds=strategy.cooldown_seconds)
@@ -94,11 +92,10 @@ def ensure_cooldown(strategy: AlertStrategy, ticker: str, action: str) -> None:
             AlertEventStatus.COMPLETED,
             AlertEventStatus.RECEIVED,
         ],
-    ).exclude(status=AlertEventStatus.REJECTED)
-    # Exclude the event we just created: caller should pass after save with id,
-    # so we check count of other accepted-like events in window.
-    # Simpler: any non-rejected event in window besides newest.
-    if recent.count() > 1:
+    )
+    if exclude_event_id:
+        recent = recent.exclude(pk=exclude_event_id)
+    if recent.exists():
         raise AlertGuardError(
             'COOLDOWN',
             f'동일 티커/액션 쿨다운 중입니다 ({strategy.cooldown_seconds}초).',

@@ -2,10 +2,11 @@ from rest_framework import serializers
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db.models import Q
 from .models import (
     Order, Account, Symbol, Broker, DailyRealizedProfit, Holding,
     TargetAllocationPlan, ExchangeFeeRebate,
-    AlertStrategy, AlertEvent, AlertTradePlan, AlertTradeLeg,
+    Strategy, StrategyLink, StrategyVisibility, AlertEvent, AlertTradePlan, AlertTradeLeg,
 )
 from .sell_quantity import (
     resolve_sell_quantity,
@@ -62,6 +63,7 @@ class MeSerializer(serializers.ModelSerializer):
             'first_name',
             'display_name',
             'has_usable_password',
+            'is_staff',
         ]
 
     def get_display_name(self, obj):
@@ -505,32 +507,24 @@ class ExchangeFeeRebateSerializer(serializers.ModelSerializer):
         ]
 
 
-class AlertStrategySerializer(serializers.ModelSerializer):
-    """TradingView 알림 전략 시리얼라이저"""
-    account = AccountSerializer(read_only=True)
-    account_id = serializers.PrimaryKeyRelatedField(
-        queryset=Account.objects.none(), write_only=True
-    )
+class StrategySerializer(serializers.ModelSerializer):
+    """전략 템플릿 시리얼라이저"""
+    owner_username = serializers.CharField(source='owner.username', read_only=True)
+    visibility_display = serializers.CharField(source='get_visibility_display', read_only=True)
     order_type_display = serializers.CharField(source='get_order_type_display', read_only=True)
     webhook_url = serializers.SerializerMethodField()
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            self.fields['account_id'].queryset = Account.objects.filter(user=request.user)
-
     class Meta:
-        model = AlertStrategy
+        model = Strategy
         fields = [
-            'id', 'account', 'account_id', 'name', 'webhook_token', 'webhook_url',
-            'webhook_passphrase', 'seed_amount', 'seed_currency',
-            'buy_seed_percent', 'sell_seed_percent', 'max_position_weight_percent',
-            'min_sell_holding_percent', 'split_count', 'split_interval_seconds',
+            'id', 'owner', 'owner_username', 'title', 'description', 'visibility',
+            'visibility_display', 'webhook_token', 'webhook_url', 'webhook_passphrase',
+            'default_max_position_weight_percent', 'default_trade_percent',
+            'default_split_count', 'default_split_interval_seconds',
             'order_type', 'order_type_display', 'enabled', 'allowed_tickers',
             'cooldown_seconds', 'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'webhook_token', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'owner', 'webhook_token', 'created_at', 'updated_at']
         extra_kwargs = {
             'webhook_passphrase': {'write_only': True, 'required': False, 'allow_null': True},
         }
@@ -542,14 +536,71 @@ class AlertStrategySerializer(serializers.ModelSerializer):
             return request.build_absolute_uri(path)
         return path
 
-    def create(self, validated_data):
-        validated_data['account'] = validated_data.pop('account_id')
-        return AlertStrategy.objects.create(**validated_data)
+    def validate_visibility(self, value):
+        request = self.context.get('request')
+        if value == StrategyVisibility.PUBLIC and request and not request.user.is_staff:
+            raise serializers.ValidationError('공개 전략은 관리자만 생성할 수 있습니다.')
+        return value
 
-    def update(self, instance, validated_data):
-        if 'account_id' in validated_data:
-            validated_data['account'] = validated_data.pop('account_id')
-        return super().update(instance, validated_data)
+    def create(self, validated_data):
+        request = self.context.get('request')
+        validated_data['owner'] = request.user
+        if not request.user.is_staff:
+            validated_data['visibility'] = StrategyVisibility.PRIVATE
+        return Strategy.objects.create(**validated_data)
+
+
+class StrategyLinkSerializer(serializers.ModelSerializer):
+    """전략 연동 시리얼라이저"""
+    strategy = StrategySerializer(read_only=True)
+    strategy_id = serializers.PrimaryKeyRelatedField(
+        queryset=Strategy.objects.all(), write_only=True, source='strategy'
+    )
+    account = AccountSerializer(read_only=True)
+    account_id = serializers.PrimaryKeyRelatedField(
+        queryset=Account.objects.none(), write_only=True, source='account'
+    )
+    effective_max_position_weight_percent = serializers.DecimalField(
+        max_digits=8, decimal_places=4, read_only=True
+    )
+    effective_trade_percent = serializers.DecimalField(
+        max_digits=8, decimal_places=4, read_only=True
+    )
+    effective_split_count = serializers.IntegerField(read_only=True)
+    effective_split_interval_seconds = serializers.IntegerField(read_only=True)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            self.fields['account_id'].queryset = Account.objects.filter(user=request.user)
+            self.fields['strategy_id'].queryset = Strategy.objects.filter(
+                Q(visibility=StrategyVisibility.PUBLIC) | Q(owner=request.user)
+            )
+
+    class Meta:
+        model = StrategyLink
+        fields = [
+            'id', 'strategy', 'strategy_id', 'account', 'account_id',
+            'seed_amount', 'seed_currency',
+            'max_position_weight_percent', 'trade_percent',
+            'split_count', 'split_interval_seconds', 'enabled',
+            'effective_max_position_weight_percent', 'effective_trade_percent',
+            'effective_split_count', 'effective_split_interval_seconds',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate(self, attrs):
+        request = self.context.get('request')
+        account = attrs.get('account') or getattr(self.instance, 'account', None)
+        strategy = attrs.get('strategy') or getattr(self.instance, 'strategy', None)
+        if account and request and account.user != request.user:
+            raise serializers.ValidationError({'account_id': '본인 계좌만 연동할 수 있습니다.'})
+        if strategy and request:
+            if strategy.visibility != StrategyVisibility.PUBLIC and strategy.owner_id != request.user.id:
+                raise serializers.ValidationError({'strategy_id': '연동할 수 없는 전략입니다.'})
+        return attrs
 
 
 class AlertTradeLegSerializer(serializers.ModelSerializer):
@@ -572,7 +623,7 @@ class AlertTradePlanSerializer(serializers.ModelSerializer):
     class Meta:
         model = AlertTradePlan
         fields = [
-            'id', 'event', 'account', 'symbol', 'side', 'side_display',
+            'id', 'event', 'strategy_link', 'account', 'symbol', 'side', 'side_display',
             'total_notional', 'total_quantity', 'reference_price',
             'split_count', 'split_interval_seconds', 'order_type',
             'status', 'status_display', 'legs_done', 'legs',
@@ -582,15 +633,15 @@ class AlertTradePlanSerializer(serializers.ModelSerializer):
 
 
 class AlertEventSerializer(serializers.ModelSerializer):
-    strategy_name = serializers.CharField(source='strategy.name', read_only=True)
+    strategy_title = serializers.CharField(source='strategy.title', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
-    trade_plan = AlertTradePlanSerializer(read_only=True)
+    trade_plans = AlertTradePlanSerializer(many=True, read_only=True)
 
     class Meta:
         model = AlertEvent
         fields = [
-            'id', 'strategy', 'strategy_name', 'raw_payload', 'ticker', 'action',
+            'id', 'strategy', 'strategy_title', 'raw_payload', 'ticker', 'action',
             'idempotency_key', 'status', 'status_display', 'reject_reason',
-            'trade_plan', 'received_at', 'updated_at',
+            'trade_plans', 'received_at', 'updated_at',
         ]
         read_only_fields = fields

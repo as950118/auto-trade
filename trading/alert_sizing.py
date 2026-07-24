@@ -1,12 +1,11 @@
 """
-Alert 전략 전용 사이징: 고정 시드 금액의 N% + 보유 비중 캡.
-수동 주문의 buy_quantity/sell_quantity와 분리한다.
+StrategyLink 기반 사이징: 고정 시드 금액의 N% + 보유 비중 캡.
 """
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_DOWN
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
-from .models import Account, AlertStrategy, Holding, OrderSide, Symbol
+from .models import Account, Holding, OrderSide, StrategyLink, Symbol
 
 
 ZERO = Decimal('0')
@@ -21,6 +20,32 @@ class AlertSizingError(Exception):
         self.code = code
         self.message = message
         super().__init__(message)
+
+
+@dataclass
+class EffectiveTradeConfig:
+    """사이징에 사용할 최종 설정 (Link override ?? Strategy default)"""
+    seed_amount: Decimal
+    seed_currency: str
+    trade_percent: Decimal
+    max_position_weight_percent: Decimal
+    split_count: int
+    split_interval_seconds: int
+    order_type: str
+    min_sell_holding_percent: Optional[Decimal] = None
+
+
+def config_from_link(link: StrategyLink) -> EffectiveTradeConfig:
+    return EffectiveTradeConfig(
+        seed_amount=link.seed_amount,
+        seed_currency=link.seed_currency,
+        trade_percent=link.effective_trade_percent,
+        max_position_weight_percent=link.effective_max_position_weight_percent,
+        split_count=link.effective_split_count,
+        split_interval_seconds=link.effective_split_interval_seconds,
+        order_type=link.strategy.order_type,
+        min_sell_holding_percent=None,
+    )
 
 
 @dataclass
@@ -65,34 +90,35 @@ def position_value_of(holding: Optional[Holding], price: Decimal) -> Decimal:
 
 
 def size_alert_trade(
-    strategy: AlertStrategy,
+    config: Union[EffectiveTradeConfig, StrategyLink],
     account: Account,
     symbol: Symbol,
     side: str,
     reference_price: Optional[Decimal] = None,
 ) -> SizingResult:
-    """
-    시드% 기준으로 매수/매도 notional·quantity를 산정하고 비중 가드를 적용한다.
-    """
-    if strategy.seed_amount <= 0:
+    """시드% 기준으로 매수/매도 notional·quantity를 산정하고 비중 가드를 적용한다."""
+    if isinstance(config, StrategyLink):
+        config = config_from_link(config)
+
+    if config.seed_amount <= 0:
         raise AlertSizingError('INVALID_SEED', '시드 금액이 올바르지 않습니다.')
 
     holding = get_holding(account, symbol)
     price = resolve_reference_price(holding, reference_price)
     position_value = position_value_of(holding, price)
-    current_weight = (position_value / strategy.seed_amount * 100).quantize(
+    current_weight = (position_value / config.seed_amount * 100).quantize(
         Decimal('0.0001'), rounding=ROUND_DOWN
     )
 
     if side == OrderSide.BUY:
-        return _size_buy(strategy, account, symbol, price, position_value, current_weight)
+        return _size_buy(config, account, symbol, price, position_value, current_weight)
     if side == OrderSide.SELL:
-        return _size_sell(strategy, holding, price, position_value, current_weight)
+        return _size_sell(config, holding, price, position_value, current_weight)
     raise AlertSizingError('INVALID_ACTION', f'지원하지 않는 액션: {side}')
 
 
 def _size_buy(
-    strategy: AlertStrategy,
+    config: EffectiveTradeConfig,
     account: Account,
     symbol: Symbol,
     price: Decimal,
@@ -100,11 +126,11 @@ def _size_buy(
     current_weight: Decimal,
 ) -> SizingResult:
     buy_notional = (
-        strategy.seed_amount * strategy.buy_seed_percent / Decimal('100')
+        config.seed_amount * config.trade_percent / Decimal('100')
     ).quantize(MONEY_QUANT, rounding=ROUND_DOWN)
 
     max_value = (
-        strategy.seed_amount * strategy.max_position_weight_percent / Decimal('100')
+        config.seed_amount * config.max_position_weight_percent / Decimal('100')
     ).quantize(MONEY_QUANT, rounding=ROUND_DOWN)
     remaining_capacity = max(ZERO, max_value - position_value)
 
@@ -114,7 +140,7 @@ def _size_buy(
     if buy_notional > remaining_capacity:
         buy_notional = remaining_capacity
 
-    cash = _get_cash_balance(account, strategy.seed_currency or symbol.currency)
+    cash = _get_cash_balance(account, config.seed_currency or symbol.currency)
     if cash <= 0:
         raise AlertSizingError('INSUFFICIENT_CASH', '매수 가능한 예수금이 없습니다.')
     if buy_notional > cash:
@@ -143,7 +169,7 @@ def _size_buy(
 
 
 def _size_sell(
-    strategy: AlertStrategy,
+    config: EffectiveTradeConfig,
     holding: Optional[Holding],
     price: Decimal,
     position_value: Decimal,
@@ -152,19 +178,19 @@ def _size_sell(
     if not holding or holding.quantity <= 0:
         raise AlertSizingError('NO_HOLDING', '해당 종목을 보유하고 있지 않습니다.')
 
-    if strategy.min_sell_holding_percent is not None:
+    if config.min_sell_holding_percent is not None:
         min_value = (
-            strategy.seed_amount * strategy.min_sell_holding_percent / Decimal('100')
+            config.seed_amount * config.min_sell_holding_percent / Decimal('100')
         )
         if position_value < min_value:
             raise AlertSizingError(
                 'BELOW_MIN_HOLDING_WEIGHT',
                 f'보유 비중({current_weight}%)이 최소 매도 비중 '
-                f'({strategy.min_sell_holding_percent}%) 미만입니다.',
+                f'({config.min_sell_holding_percent}%) 미만입니다.',
             )
 
     sell_notional = (
-        strategy.seed_amount * strategy.sell_seed_percent / Decimal('100')
+        config.seed_amount * config.trade_percent / Decimal('100')
     ).quantize(MONEY_QUANT, rounding=ROUND_DOWN)
 
     sell_qty = (sell_notional / price).quantize(QTY_QUANT, rounding=ROUND_DOWN)

@@ -640,9 +640,14 @@ class TargetAllocationPlan(models.Model):
 
 
 def generate_webhook_token():
-    """AlertStrategy webhook_token 기본값"""
+    """Strategy webhook_token 기본값"""
     import secrets
     return secrets.token_urlsafe(32)
+
+
+class StrategyVisibility(models.TextChoices):
+    PUBLIC = 'PUBLIC', '공개'
+    PRIVATE = 'PRIVATE', '비공개'
 
 
 class AlertEventStatus(models.TextChoices):
@@ -666,18 +671,30 @@ class AlertTradeStatus(models.TextChoices):
     SKIPPED = 'SKIPPED', '스킵'
 
 
-class AlertStrategy(models.Model):
+class Strategy(models.Model):
     """
-    TradingView webhook 기반 매수/매도 전략.
-    고정 시드 금액의 N%로 사이징하고, 보유 비중을 검사한 뒤 분할 실행한다.
+    TradingView webhook 전략 템플릿.
+    기본 비중/분할을 정의하고, 계좌는 StrategyLink로 연동한다.
+
+    향후 수수료 확장 (미구현 — trading.strategy_fees 참고):
+      - fee_enabled, fee_rate_bps 등 제작자 수익 필드
+      - payee 는 보통 owner
+      - PUBLIC 전략에만 과금하는 정책을 권장
     """
-    account = models.ForeignKey(
-        Account,
+    owner = models.ForeignKey(
+        User,
         on_delete=models.CASCADE,
-        related_name='alert_strategies',
-        verbose_name='계좌'
+        related_name='strategies',
+        verbose_name='소유자'
     )
-    name = models.CharField(max_length=100, verbose_name='전략명')
+    title = models.CharField(max_length=100, verbose_name='제목')
+    description = models.TextField(blank=True, default='', verbose_name='설명')
+    visibility = models.CharField(
+        max_length=10,
+        choices=StrategyVisibility.choices,
+        default=StrategyVisibility.PRIVATE,
+        verbose_name='공개 범위'
+    )
     webhook_token = models.CharField(
         max_length=64,
         unique=True,
@@ -692,58 +709,30 @@ class AlertStrategy(models.Model):
         verbose_name='웹훅 패스프레이즈',
         help_text='payload secret과 일치해야 함 (비우면 미검증)'
     )
-    seed_amount = models.DecimalField(
-        max_digits=20,
-        decimal_places=2,
-        validators=[MinValueValidator(Decimal('0.01'))],
-        verbose_name='고정 시드 금액'
-    )
-    seed_currency = models.CharField(
-        max_length=10,
-        choices=Currency.choices,
-        default=Currency.KRW,
-        verbose_name='시드 통화'
-    )
-    buy_seed_percent = models.DecimalField(
-        max_digits=8,
-        decimal_places=4,
-        validators=[MinValueValidator(Decimal('0.0001')), MaxValueValidator(Decimal('100'))],
-        verbose_name='매수 시드 비율 (%)',
-        help_text='시드 금액 대비 매수 금액 비율'
-    )
-    sell_seed_percent = models.DecimalField(
-        max_digits=8,
-        decimal_places=4,
-        validators=[MinValueValidator(Decimal('0.0001')), MaxValueValidator(Decimal('100'))],
-        verbose_name='매도 시드 비율 (%)',
-        help_text='시드 금액 대비 매도 금액 비율 (보유 수량으로 캡)'
-    )
-    max_position_weight_percent = models.DecimalField(
+    default_max_position_weight_percent = models.DecimalField(
         max_digits=8,
         decimal_places=4,
         default=Decimal('100'),
         validators=[MinValueValidator(Decimal('0.0001')), MaxValueValidator(Decimal('100'))],
-        verbose_name='최대 포지션 비중 (%)',
+        verbose_name='default 최대 포지션 비중 (%)',
         help_text='시드 대비 종목 최대 보유 비중 (매수 상한)'
     )
-    min_sell_holding_percent = models.DecimalField(
+    default_trade_percent = models.DecimalField(
         max_digits=8,
         decimal_places=4,
-        blank=True,
-        null=True,
-        validators=[MinValueValidator(Decimal('0')), MaxValueValidator(Decimal('100'))],
-        verbose_name='최소 매도 보유 비중 (%)',
-        help_text='보유 평가액이 시드 대비 이 비중 미만이면 매도 스킵 (선택)'
+        validators=[MinValueValidator(Decimal('0.0001')), MaxValueValidator(Decimal('100'))],
+        verbose_name='default 매매당 비중 (%)',
+        help_text='시드 금액 대비 매수/매도 금액 비율'
     )
-    split_count = models.PositiveIntegerField(
+    default_split_count = models.PositiveIntegerField(
         default=1,
         validators=[MinValueValidator(1)],
-        verbose_name='분할 횟수',
+        verbose_name='default 분할 횟수',
         help_text='1이면 일시 전량'
     )
-    split_interval_seconds = models.PositiveIntegerField(
+    default_split_interval_seconds = models.PositiveIntegerField(
         default=0,
-        verbose_name='분할 간격 (초)',
+        verbose_name='default 분할 기간 (초)',
         help_text='분할 횟수가 1보다 클 때 Leg 간 대기 시간'
     )
     order_type = models.CharField(
@@ -768,18 +757,121 @@ class AlertStrategy(models.Model):
     updated_at = models.DateTimeField(auto_now=True, verbose_name='수정일시')
 
     class Meta:
-        verbose_name = '알림 전략'
-        verbose_name_plural = '알림 전략들'
+        verbose_name = '전략'
+        verbose_name_plural = '전략들'
         ordering = ['-created_at']
 
     def __str__(self):
-        return f"{self.name} ({self.account})"
+        return f"{self.title} ({self.visibility})"
+
+
+class StrategyLink(models.Model):
+    """
+    계좌 ↔ 전략 연동 (중계). override null이면 Strategy default 사용.
+
+    향후 수수료 확장 (미구현 — trading.strategy_fees 참고):
+      - fee_rate_bps override / 연동 시점 스냅샷
+      - account.user == strategy.owner 이면 면제
+      - 체결(FILLED) 시 StrategyCommission 원장 생성의 기준 엔티티
+    """
+    strategy = models.ForeignKey(
+        Strategy,
+        on_delete=models.CASCADE,
+        related_name='links',
+        verbose_name='전략'
+    )
+    account = models.ForeignKey(
+        Account,
+        on_delete=models.CASCADE,
+        related_name='strategy_links',
+        verbose_name='계좌'
+    )
+    seed_amount = models.DecimalField(
+        max_digits=20,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.01'))],
+        verbose_name='고정 시드 금액'
+    )
+    seed_currency = models.CharField(
+        max_length=10,
+        choices=Currency.choices,
+        default=Currency.KRW,
+        verbose_name='시드 통화'
+    )
+    max_position_weight_percent = models.DecimalField(
+        max_digits=8,
+        decimal_places=4,
+        blank=True,
+        null=True,
+        validators=[MinValueValidator(Decimal('0.0001')), MaxValueValidator(Decimal('100'))],
+        verbose_name='최대 포지션 비중 override (%)',
+    )
+    trade_percent = models.DecimalField(
+        max_digits=8,
+        decimal_places=4,
+        blank=True,
+        null=True,
+        validators=[MinValueValidator(Decimal('0.0001')), MaxValueValidator(Decimal('100'))],
+        verbose_name='매매당 비중 override (%)',
+    )
+    split_count = models.PositiveIntegerField(
+        blank=True,
+        null=True,
+        validators=[MinValueValidator(1)],
+        verbose_name='분할 횟수 override',
+    )
+    split_interval_seconds = models.PositiveIntegerField(
+        blank=True,
+        null=True,
+        verbose_name='분할 기간 override (초)',
+    )
+    enabled = models.BooleanField(default=True, verbose_name='연동 활성')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='생성일시')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='수정일시')
+
+    class Meta:
+        verbose_name = '전략 연동'
+        verbose_name_plural = '전략 연동들'
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['strategy', 'account'],
+                name='unique_strategy_account_link'
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.strategy.title} ↔ {self.account_id}"
+
+    @property
+    def effective_max_position_weight_percent(self) -> Decimal:
+        if self.max_position_weight_percent is not None:
+            return self.max_position_weight_percent
+        return self.strategy.default_max_position_weight_percent
+
+    @property
+    def effective_trade_percent(self) -> Decimal:
+        if self.trade_percent is not None:
+            return self.trade_percent
+        return self.strategy.default_trade_percent
+
+    @property
+    def effective_split_count(self) -> int:
+        if self.split_count is not None:
+            return int(self.split_count)
+        return int(self.strategy.default_split_count)
+
+    @property
+    def effective_split_interval_seconds(self) -> int:
+        if self.split_interval_seconds is not None:
+            return int(self.split_interval_seconds)
+        return int(self.strategy.default_split_interval_seconds)
 
 
 class AlertEvent(models.Model):
     """TradingView webhook 수신 이벤트 (감사/재처리용)"""
     strategy = models.ForeignKey(
-        AlertStrategy,
+        Strategy,
         on_delete=models.CASCADE,
         related_name='events',
         verbose_name='전략'
@@ -822,16 +914,24 @@ class AlertEvent(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.strategy.name} {self.action} {self.ticker} [{self.status}]"
+        return f"{self.strategy.title} {self.action} {self.ticker} [{self.status}]"
 
 
 class AlertTradePlan(models.Model):
-    """알림 기반 분할 매매 계획"""
-    event = models.OneToOneField(
+    """알림 기반 분할 매매 계획 (연동 계좌당 1개)"""
+    event = models.ForeignKey(
         AlertEvent,
         on_delete=models.CASCADE,
-        related_name='trade_plan',
+        related_name='trade_plans',
         verbose_name='이벤트'
+    )
+    strategy_link = models.ForeignKey(
+        StrategyLink,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='trade_plans',
+        verbose_name='전략 연동'
     )
     account = models.ForeignKey(
         Account,

@@ -263,6 +263,14 @@ def check_order_status(order: Order, client=None):
                                 )
                             except Exception as e:
                                 logger.error(f"실현 손익 계산 실패 (Order ID: {order.id}): {str(e)}")
+
+                        # 전략 연동 주문 수수료 훅 (현재 no-op — strategy_fees 참고)
+                        if not was_filled:
+                            try:
+                                from .strategy_fees import on_strategy_order_filled
+                                on_strategy_order_filled(order)
+                            except Exception as e:
+                                logger.error(f"전략 수수료 훅 실패 (Order ID: {order.id}): {str(e)}")
                     elif state == 'cancel':
                         # 취소됨
                         order.status = OrderStatus.CANCELLED

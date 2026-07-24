@@ -1,7 +1,7 @@
 from django.contrib import admin
 from .models import (
     Broker, Symbol, Account, Order, Holding, TargetAllocationPlan, ExchangeFeeRebate,
-    AlertStrategy, AlertEvent, AlertTradePlan, AlertTradeLeg,
+    Strategy, StrategyLink, AlertEvent, AlertTradePlan, AlertTradeLeg,
 )
 
 
@@ -22,21 +22,20 @@ class SymbolAdmin(admin.ModelAdmin):
 @admin.register(Account)
 class AccountAdmin(admin.ModelAdmin):
     list_display = [
-        'user', 'broker', 'account_number', 'total_assets', 
-        'cash_balance', 'stock_value', 'profit_loss', 'profit_rate',
+        'user', 'broker', 'account_number', 'total_assets',
+        'cash_balance', 'stock_value', 'profit_rate',
         'buy_enabled', 'sell_enabled', 'created_at'
     ]
     list_filter = ['broker', 'buy_enabled', 'sell_enabled', 'unified_margin']
     search_fields = ['user__username', 'account_number', 'broker__name']
     readonly_fields = [
-        'total_assets', 'cash_balance', 'stock_value', 'profit_loss', 'profit_rate',
+        'total_assets', 'cash_balance', 'stock_value', 'profit_rate',
         'cash_balance_krw', 'stock_value_krw', 'total_assets_krw',
         'cash_balance_usd', 'stock_value_usd', 'total_assets_usd',
-        'profit_loss_krw', 'profit_rate_krw', 'profit_loss_usd', 'profit_rate_usd',
         'access_token', 'refresh_token', 'token_expires_at', 'token_issued_at',
         'created_at', 'updated_at'
     ]
-    
+
     fieldsets = (
         ('기본 정보', {
             'fields': ('user', 'broker', 'account_number', 'account_password')
@@ -46,9 +45,9 @@ class AccountAdmin(admin.ModelAdmin):
         }),
         ('자산 정보', {
             'fields': (
-                'total_assets', 'cash_balance', 'stock_value', 'profit_loss', 'profit_rate',
-                'cash_balance_krw', 'stock_value_krw', 'total_assets_krw', 'profit_loss_krw', 'profit_rate_krw',
-                'cash_balance_usd', 'stock_value_usd', 'total_assets_usd', 'profit_loss_usd', 'profit_rate_usd',
+                'total_assets', 'cash_balance', 'stock_value', 'profit_rate',
+                'cash_balance_krw', 'stock_value_krw', 'total_assets_krw',
+                'cash_balance_usd', 'stock_value_usd', 'total_assets_usd'
             )
         }),
         ('거래 제한 설정', {
@@ -62,16 +61,17 @@ class AccountAdmin(admin.ModelAdmin):
         }),
     )
 
+
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
     list_display = [
-        'account', 'symbol', 'side', 'order_type', 'quantity', 
+        'account', 'symbol', 'side', 'order_type', 'quantity',
         'price', 'status', 'external_order_id', 'filled_quantity', 'average_filled_price', 'created_at'
     ]
     list_filter = ['side', 'order_type', 'status', 'created_at']
     search_fields = ['account__user__username', 'symbol__ticker', 'symbol__name', 'external_order_id']
     readonly_fields = ['created_at', 'updated_at', 'filled_at']
-    
+
     fieldsets = (
         ('주문 정보', {
             'fields': ('account', 'symbol', 'side', 'order_type', 'quantity', 'price')
@@ -94,7 +94,7 @@ class HoldingAdmin(admin.ModelAdmin):
     list_filter = ['account__broker', 'updated_at']
     search_fields = ['account__user__username', 'symbol__ticker', 'symbol__name']
     readonly_fields = ['total_value', 'profit_loss', 'profit_rate', 'created_at', 'updated_at']
-    
+
     fieldsets = (
         ('기본 정보', {
             'fields': ('account', 'symbol')
@@ -135,16 +135,28 @@ class ExchangeFeeRebateAdmin(admin.ModelAdmin):
     list_editable = ['is_active']
 
 
-@admin.register(AlertStrategy)
-class AlertStrategyAdmin(admin.ModelAdmin):
+@admin.register(Strategy)
+class StrategyAdmin(admin.ModelAdmin):
     list_display = [
-        'name', 'account', 'seed_amount', 'seed_currency',
-        'buy_seed_percent', 'sell_seed_percent', 'max_position_weight_percent',
+        'title', 'owner', 'visibility', 'default_trade_percent',
+        'default_max_position_weight_percent', 'default_split_count',
+        'enabled', 'created_at',
+    ]
+    list_filter = ['enabled', 'visibility', 'order_type']
+    search_fields = ['title', 'owner__username', 'webhook_token']
+    readonly_fields = ['webhook_token', 'created_at', 'updated_at']
+    list_editable = ['enabled']
+
+
+@admin.register(StrategyLink)
+class StrategyLinkAdmin(admin.ModelAdmin):
+    list_display = [
+        'strategy', 'account', 'seed_amount', 'seed_currency',
+        'trade_percent', 'max_position_weight_percent',
         'split_count', 'enabled', 'created_at',
     ]
-    list_filter = ['enabled', 'seed_currency', 'order_type']
-    search_fields = ['name', 'account__user__username', 'webhook_token']
-    readonly_fields = ['webhook_token', 'created_at', 'updated_at']
+    list_filter = ['enabled', 'seed_currency']
+    search_fields = ['strategy__title', 'account__user__username']
     list_editable = ['enabled']
 
 
@@ -155,7 +167,7 @@ class AlertEventAdmin(admin.ModelAdmin):
         'idempotency_key', 'received_at',
     ]
     list_filter = ['status', 'action', 'received_at']
-    search_fields = ['ticker', 'idempotency_key', 'strategy__name']
+    search_fields = ['ticker', 'idempotency_key', 'strategy__title']
     readonly_fields = ['raw_payload', 'received_at', 'updated_at']
 
 
