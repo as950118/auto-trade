@@ -40,6 +40,10 @@ cert.crt
 cert.key
 *.pem
 
+# SSH deploy keys (never commit these)
+*.key
+*.pub
+
 # Applications
 *.app
 *.exe
