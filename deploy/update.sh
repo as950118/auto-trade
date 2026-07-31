@@ -32,7 +32,10 @@ git config --system --add safe.directory "$APP_DIR"
 
 if [[ -d .git ]]; then
   echo "==> git pull"
-  sudo -u "$APP_USER" git pull --ff-only
+  # www-data의 기본 $HOME(/var/www)은 보통 root 소유라 www-data 자신이 쓸 수
+  # 없다. git이 전역 설정을 읽거나 쓰려고 할 때 이 경로를 건드리다 실패하지
+  # 않도록, 이미 www-data 소유로 chown해둔 APP_DIR을 HOME으로 지정한다.
+  sudo -u "$APP_USER" env HOME="$APP_DIR" git pull --ff-only
 fi
 
 echo "==> pip install"
@@ -40,8 +43,8 @@ echo "==> pip install"
 .venv/bin/pip install gunicorn
 
 echo "==> migrate / collectstatic"
-sudo -u "$APP_USER" bash -c "cd '$APP_DIR' && .venv/bin/python manage.py migrate --noinput"
-sudo -u "$APP_USER" bash -c "cd '$APP_DIR' && .venv/bin/python manage.py collectstatic --noinput"
+sudo -u "$APP_USER" env HOME="$APP_DIR" bash -c "cd '$APP_DIR' && .venv/bin/python manage.py migrate --noinput"
+sudo -u "$APP_USER" env HOME="$APP_DIR" bash -c "cd '$APP_DIR' && .venv/bin/python manage.py collectstatic --noinput"
 
 echo "==> restart"
 systemctl restart "$SERVICE_NAME"
