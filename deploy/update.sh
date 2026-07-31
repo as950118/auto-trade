@@ -19,6 +19,12 @@ fi
 cd "$APP_DIR"
 
 if [[ -d .git ]]; then
+  # APP_DIR이 보통 setup.sh를 실행한 유저(예: ubuntu) 소유라, 이 스크립트를
+  # 실행하는 root/APP_USER와 소유자가 달라 git이 "dubious ownership"으로
+  # pull을 거부할 수 있다. 두 유저 모두에 대해 안전 예외를 등록해둔다.
+  git config --global --add safe.directory "$APP_DIR"
+  sudo -u "$APP_USER" git config --global --add safe.directory "$APP_DIR"
+
   echo "==> git pull"
   sudo -u "$APP_USER" git pull --ff-only || git pull --ff-only
 fi
