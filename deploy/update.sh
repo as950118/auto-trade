@@ -18,15 +18,21 @@ fi
 
 cd "$APP_DIR"
 
-if [[ -d .git ]]; then
-  # APP_DIR이 보통 setup.sh를 실행한 유저(예: ubuntu) 소유라, 이 스크립트를
-  # 실행하는 root/APP_USER와 소유자가 달라 git이 "dubious ownership"으로
-  # pull을 거부할 수 있다. 두 유저 모두에 대해 안전 예외를 등록해둔다.
-  git config --global --add safe.directory "$APP_DIR"
-  sudo -u "$APP_USER" git config --global --add safe.directory "$APP_DIR"
+# APP_DIR은 보통 setup.sh를 실행한 로그인 유저(예: ubuntu) 소유로 남아있는데,
+# 이후 배포 단계들은 APP_USER(www-data)로 git pull / migrate / collectstatic을
+# 수행한다. 소유자가 섞여 있으면 ".git/FETCH_HEAD: Permission denied" 같은
+# 에러나 git의 "dubious ownership" 거부가 발생한다. 이 스크립트는 이미
+# root로만 실행되므로(위 체크), 매 배포마다 소유권을 APP_USER로 통일해서
+# 이런 드리프트를 자동으로 정리한다.
+chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 
+# --system 설정은 유저별 $HOME/.gitconfig 유무와 무관하게 root/APP_USER
+# 모두에 적용되므로, 유저마다 safe.directory를 따로 등록할 필요가 없다.
+git config --system --add safe.directory "$APP_DIR"
+
+if [[ -d .git ]]; then
   echo "==> git pull"
-  sudo -u "$APP_USER" git pull --ff-only || git pull --ff-only
+  sudo -u "$APP_USER" git pull --ff-only
 fi
 
 echo "==> pip install"
