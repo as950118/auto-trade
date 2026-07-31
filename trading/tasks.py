@@ -14,13 +14,31 @@ logger = logging.getLogger(__name__)
 
 def process_orders():
     """대기중인 주문들을 처리"""
-    pending_orders = Order.objects.filter(status=OrderStatus.PENDING)
-    pending_count = pending_orders.count()
-    
-    logger.info(f"처리할 주문 수: {pending_count}")
-    
+    pending_order_ids = list(
+        Order.objects.filter(status=OrderStatus.PENDING).values_list('id', flat=True)
+    )
+
+    logger.info(f"처리할 주문 수: {len(pending_order_ids)}")
+
     processed_count = 0
-    for order in pending_orders:
+    for order_id in pending_order_ids:
+        # PENDING -> SUBMITTING 전이를 하나의 원자적 UPDATE로 수행한다.
+        # 브로커 호출(place_order)이 스케줄러 주기보다 오래 걸리는 경우,
+        # 이 전이가 없으면 같은 주문이 여전히 PENDING 상태로 남아있어
+        # 다음 스케줄에서 다시 집혀 브로커에 중복 체결될 수 있었다.
+        # filter().update()는 PostgreSQL/SQLite 모두에서 단일 원자적 문장이므로
+        # 갱신된 행 수(claimed)로 "내가 이 주문을 선점했는지"를 안전하게 판별할 수 있다.
+        claimed = Order.objects.filter(
+            id=order_id, status=OrderStatus.PENDING
+        ).update(status=OrderStatus.SUBMITTING)
+
+        if claimed == 0:
+            # 다른 실행(또는 이전에 이미 시작된 처리)이 먼저 선점했거나
+            # 그 사이 상태가 바뀐 경우 - 건너뛴다.
+            logger.info(f"이미 선점되었거나 상태가 변경된 주문, 건너뜀 (Order ID: {order_id})")
+            continue
+
+        order = Order.objects.get(id=order_id)
         try:
             process_order(order)
             processed_count += 1
@@ -28,7 +46,7 @@ def process_orders():
             logger.error(f"주문 처리 실패 (Order ID: {order.id}): {str(e)}")
             order.status = OrderStatus.REJECTED
             order.save()
-    
+
     return processed_count
 
 

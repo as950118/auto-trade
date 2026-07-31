@@ -311,6 +311,7 @@ class OrderSide(models.TextChoices):
 class OrderStatus(models.TextChoices):
     """주문 상태"""
     PENDING = 'PENDING', '대기중'
+    SUBMITTING = 'SUBMITTING', '전송중'
     PARTIALLY_FILLED = 'PARTIALLY_FILLED', '부분체결'
     FILLED = 'FILLED', '체결완료'
     CANCELLED = 'CANCELLED', '취소됨'
