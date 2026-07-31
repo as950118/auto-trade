@@ -350,9 +350,9 @@ class OrderViewSet(viewsets.ModelViewSet):
                     status__in=[OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED]
                 )
             else:
-                # 처리 안된 주문 (대기중, 부분체결)
+                # 처리 안된 주문 (대기중, 전송중, 부분체결)
                 queryset = queryset.filter(
-                    status__in=[OrderStatus.PENDING, OrderStatus.PARTIALLY_FILLED]
+                    status__in=[OrderStatus.PENDING, OrderStatus.SUBMITTING, OrderStatus.PARTIALLY_FILLED]
                 )
         
         return queryset
