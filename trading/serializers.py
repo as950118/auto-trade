@@ -7,6 +7,7 @@ from .models import (
     Order, Account, Symbol, Broker, DailyRealizedProfit, Holding,
     TargetAllocationPlan, ExchangeFeeRebate,
     Strategy, StrategyLink, StrategyVisibility, AlertEvent, AlertTradePlan, AlertTradeLeg,
+    Portfolio, PortfolioHolding, PortfolioLink, PortfolioVisibility,
 )
 from .sell_quantity import (
     resolve_sell_quantity,
@@ -600,6 +601,105 @@ class StrategyLinkSerializer(serializers.ModelSerializer):
         if strategy and request:
             if strategy.visibility != StrategyVisibility.PUBLIC and strategy.owner_id != request.user.id:
                 raise serializers.ValidationError({'strategy_id': '연동할 수 없는 전략입니다.'})
+        return attrs
+
+
+class PortfolioHoldingSerializer(serializers.ModelSerializer):
+    """포트폴리오 구성 종목 시리얼라이저 (Portfolio.holdings 벌크 교체용)"""
+    symbol = SymbolSerializer(read_only=True)
+    symbol_id = serializers.PrimaryKeyRelatedField(
+        queryset=Symbol.objects.all(), write_only=True, source='symbol'
+    )
+
+    class Meta:
+        model = PortfolioHolding
+        fields = ['id', 'symbol', 'symbol_id', 'target_weight_percent', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate_target_weight_percent(self, value):
+        if value < 0 or value > 100:
+            raise serializers.ValidationError('목표 비중은 0~100 사이여야 합니다.')
+        return value
+
+
+class PortfolioSerializer(serializers.ModelSerializer):
+    """포트폴리오 시리얼라이저"""
+    owner_username = serializers.CharField(source='owner.username', read_only=True)
+    visibility_display = serializers.CharField(source='get_visibility_display', read_only=True)
+    order_type_display = serializers.CharField(source='get_order_type_display', read_only=True)
+    holdings = PortfolioHoldingSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Portfolio
+        fields = [
+            'id', 'owner', 'owner_username', 'title', 'description', 'visibility',
+            'visibility_display', 'order_type', 'order_type_display', 'enabled',
+            'holdings', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'owner', 'created_at', 'updated_at']
+
+    def validate_visibility(self, value):
+        request = self.context.get('request')
+        if value == PortfolioVisibility.PUBLIC and request and not request.user.is_staff:
+            raise serializers.ValidationError('공개 포트폴리오는 관리자만 생성할 수 있습니다.')
+        return value
+
+    def create(self, validated_data):
+        request = self.context.get('request')
+        validated_data['owner'] = request.user
+        if not request.user.is_staff:
+            validated_data['visibility'] = PortfolioVisibility.PRIVATE
+        return Portfolio.objects.create(**validated_data)
+
+
+class PortfolioLinkSerializer(serializers.ModelSerializer):
+    """포트폴리오 연동(구독) 시리얼라이저"""
+    portfolio = PortfolioSerializer(read_only=True)
+    portfolio_id = serializers.PrimaryKeyRelatedField(
+        queryset=Portfolio.objects.all(), write_only=True, source='portfolio'
+    )
+    account = AccountSerializer(read_only=True)
+    account_id = serializers.PrimaryKeyRelatedField(
+        queryset=Account.objects.none(), write_only=True, source='account'
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            self.fields['account_id'].queryset = Account.objects.filter(user=request.user)
+            self.fields['portfolio_id'].queryset = Portfolio.objects.filter(
+                Q(visibility=PortfolioVisibility.PUBLIC) | Q(owner=request.user)
+            )
+
+    class Meta:
+        model = PortfolioLink
+        fields = [
+            'id', 'portfolio', 'portfolio_id', 'account', 'account_id',
+            'seed_amount', 'seed_currency', 'enabled',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate(self, attrs):
+        request = self.context.get('request')
+        account = attrs.get('account') or getattr(self.instance, 'account', None)
+        portfolio = attrs.get('portfolio') or getattr(self.instance, 'portfolio', None)
+        seed_currency = attrs.get('seed_currency') or getattr(self.instance, 'seed_currency', None)
+
+        if account and request and account.user != request.user:
+            raise serializers.ValidationError({'account_id': '본인 계좌만 연동할 수 있습니다.'})
+        if portfolio and request:
+            if portfolio.visibility != PortfolioVisibility.PUBLIC and portfolio.owner_id != request.user.id:
+                raise serializers.ValidationError({'portfolio_id': '구독할 수 없는 포트폴리오입니다.'})
+        if portfolio and seed_currency:
+            portfolio_currencies = set(
+                portfolio.holdings.values_list('symbol__currency', flat=True)
+            )
+            if portfolio_currencies and seed_currency not in portfolio_currencies:
+                raise serializers.ValidationError(
+                    {'seed_currency': '포트폴리오 종목 통화와 시드 통화가 일치해야 합니다.'}
+                )
         return attrs
 
 

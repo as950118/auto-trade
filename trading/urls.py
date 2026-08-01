@@ -5,6 +5,7 @@ from .views import (
     OrderViewSet, AccountViewSet, SymbolViewSet, DailyRealizedProfitViewSet,
     BrokerViewSet, HoldingViewSet, TargetAllocationPlanViewSet, ExchangeFeeRebateViewSet,
     StrategyViewSet, StrategyLinkViewSet, AlertEventViewSet, AlertTradePlanViewSet, signup,
+    PortfolioViewSet, PortfolioLinkViewSet,
 )
 from .oauth2_views import google_oauth2_login, google_oauth2_callback
 from .webhooks import tradingview_webhook
@@ -22,6 +23,8 @@ router.register(r'strategies', StrategyViewSet, basename='strategy')
 router.register(r'strategy-links', StrategyLinkViewSet, basename='strategy-link')
 router.register(r'alert-events', AlertEventViewSet, basename='alert-event')
 router.register(r'alert-trade-plans', AlertTradePlanViewSet, basename='alert-trade-plan')
+router.register(r'portfolios', PortfolioViewSet, basename='portfolio')
+router.register(r'portfolio-links', PortfolioLinkViewSet, basename='portfolio-link')
 
 urlpatterns = [
     path('api/users/', signup, name='signup'),

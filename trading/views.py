@@ -8,11 +8,16 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken
 from drf_spectacular.utils import extend_schema, OpenApiResponse
+from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from decimal import Decimal
-from .models import Order, Account, Symbol, Broker, Country, OrderStatus, DailyRealizedProfit, Holding, TargetAllocationPlan, ExchangeFeeRebate, Strategy, StrategyLink, StrategyVisibility, AlertEvent, AlertTradePlan
+from .models import (
+    Order, Account, Symbol, Broker, Country, OrderStatus, DailyRealizedProfit, Holding,
+    TargetAllocationPlan, ExchangeFeeRebate, Strategy, StrategyLink, StrategyVisibility,
+    AlertEvent, AlertTradePlan, Portfolio, PortfolioHolding, PortfolioLink, PortfolioVisibility,
+)
 from .serializers import (
     OrderCreateSerializer, OrderSerializer, OrderUpdateSerializer,
     AccountSerializer, SymbolSerializer, DailyRealizedProfitSerializer,
@@ -20,7 +25,9 @@ from .serializers import (
     BrokerSerializer, HoldingSerializer, TargetAllocationPlanSerializer,
     ExchangeFeeRebateSerializer,
     StrategySerializer, StrategyLinkSerializer, AlertEventSerializer, AlertTradePlanSerializer,
+    PortfolioSerializer, PortfolioHoldingSerializer, PortfolioLinkSerializer,
 )
+from .services.portfolio import rebalance_link, rebalance_portfolio
 from .profit_calculator import ProfitCalculator
 from datetime import date as date_type
 from .views_profit import DailyRealizedProfitViewSet
@@ -722,6 +729,103 @@ class StrategyLinkViewSet(viewsets.ModelViewSet):
         return StrategyLink.objects.filter(
             account__user=self.request.user
         ).select_related('strategy', 'strategy__owner', 'account', 'account__broker')
+
+
+class PortfolioViewSet(viewsets.ModelViewSet):
+    """포트폴리오 CRUD + 비중(holdings) 벌크 교체"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = PortfolioSerializer
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter, filters.SearchFilter]
+    filterset_fields = ['visibility', 'enabled', 'owner']
+    search_fields = ['title', 'description']
+    ordering_fields = ['created_at', 'title']
+    ordering = ['-created_at']
+
+    def get_queryset(self):
+        user = self.request.user
+        return Portfolio.objects.filter(
+            Q(visibility=PortfolioVisibility.PUBLIC) | Q(owner=user)
+        ).select_related('owner').prefetch_related('holdings', 'holdings__symbol')
+
+    def perform_create(self, serializer):
+        serializer.save()
+
+    def perform_update(self, serializer):
+        portfolio = self.get_object()
+        if portfolio.owner_id != self.request.user.id and not self.request.user.is_staff:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('본인 포트폴리오만 수정할 수 있습니다.')
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        if instance.owner_id != self.request.user.id and not self.request.user.is_staff:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('본인 포트폴리오만 삭제할 수 있습니다.')
+        instance.delete()
+
+    @action(detail=True, methods=['put'])
+    def holdings(self, request, pk=None):
+        """목표 비중 바스켓 전체 교체 후 구독 계좌 즉시 리밸런싱"""
+        from rest_framework.exceptions import PermissionDenied, ValidationError
+
+        portfolio = self.get_object()
+        if portfolio.owner_id != request.user.id and not request.user.is_staff:
+            raise PermissionDenied('본인 포트폴리오만 수정할 수 있습니다.')
+
+        items = request.data if isinstance(request.data, list) else request.data.get('holdings', [])
+        if not isinstance(items, list):
+            raise ValidationError('holdings는 리스트여야 합니다.')
+
+        symbols = []
+        weight_sum = Decimal('0')
+        currencies = set()
+        for item in items:
+            try:
+                symbol = Symbol.objects.get(pk=item['symbol_id'])
+                weight = Decimal(str(item['target_weight_percent']))
+            except (KeyError, Symbol.DoesNotExist, TypeError, ValueError):
+                raise ValidationError('symbol_id/target_weight_percent가 올바르지 않습니다.')
+            if weight < 0 or weight > 100:
+                raise ValidationError('목표 비중은 0~100 사이여야 합니다.')
+            symbols.append((symbol, weight))
+            weight_sum += weight
+            currencies.add(symbol.currency)
+
+        if weight_sum > 100:
+            raise ValidationError('목표 비중의 합은 100%를 초과할 수 없습니다.')
+        if len(currencies) > 1:
+            raise ValidationError('포트폴리오는 단일 통화의 종목으로만 구성할 수 있습니다.')
+
+        with transaction.atomic():
+            portfolio.holdings.all().delete()
+            PortfolioHolding.objects.bulk_create([
+                PortfolioHolding(portfolio=portfolio, symbol=symbol, target_weight_percent=weight)
+                for symbol, weight in symbols
+            ])
+
+        rebalance_portfolio(portfolio)
+
+        portfolio.refresh_from_db()
+        return Response(self.get_serializer(portfolio).data)
+
+
+class PortfolioLinkViewSet(viewsets.ModelViewSet):
+    """포트폴리오 연동(구독) CRUD"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = PortfolioLinkSerializer
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filterset_fields = ['portfolio', 'account', 'enabled']
+    ordering_fields = ['created_at']
+    ordering = ['-created_at']
+
+    def get_queryset(self):
+        return PortfolioLink.objects.filter(
+            account__user=self.request.user
+        ).select_related('portfolio', 'portfolio__owner', 'account', 'account__broker')
+
+    def perform_create(self, serializer):
+        link = serializer.save()
+        rebalance_link(link)
 
 
 class AlertEventViewSet(viewsets.ReadOnlyModelViewSet):

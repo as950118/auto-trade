@@ -2,6 +2,7 @@ from django.contrib import admin
 from .models import (
     Broker, Symbol, Account, Order, Holding, TargetAllocationPlan, ExchangeFeeRebate,
     Strategy, StrategyLink, AlertEvent, AlertTradePlan, AlertTradeLeg,
+    Portfolio, PortfolioHolding, PortfolioLink,
 )
 
 
@@ -157,6 +158,30 @@ class StrategyLinkAdmin(admin.ModelAdmin):
     ]
     list_filter = ['enabled', 'seed_currency']
     search_fields = ['strategy__title', 'account__user__username']
+    list_editable = ['enabled']
+
+
+class PortfolioHoldingInline(admin.TabularInline):
+    model = PortfolioHolding
+    extra = 1
+
+
+@admin.register(Portfolio)
+class PortfolioAdmin(admin.ModelAdmin):
+    list_display = ['title', 'owner', 'visibility', 'order_type', 'enabled', 'created_at']
+    list_filter = ['enabled', 'visibility', 'order_type']
+    search_fields = ['title', 'owner__username']
+    list_editable = ['enabled']
+    inlines = [PortfolioHoldingInline]
+
+
+@admin.register(PortfolioLink)
+class PortfolioLinkAdmin(admin.ModelAdmin):
+    list_display = [
+        'portfolio', 'account', 'seed_amount', 'seed_currency', 'enabled', 'created_at',
+    ]
+    list_filter = ['enabled', 'seed_currency']
+    search_fields = ['portfolio__title', 'account__user__username']
     list_editable = ['enabled']
 
 

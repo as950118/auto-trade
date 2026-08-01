@@ -383,6 +383,15 @@ class Order(models.Model):
         null=True,
         verbose_name='외부 주문 ID (브로커에서 반환한 주문 ID)'
     )
+    portfolio_link = models.ForeignKey(
+        'PortfolioLink',
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='orders',
+        verbose_name='포트폴리오 연동',
+        help_text='포트폴리오 리밸런싱으로 생성된 주문인 경우 해당 연동'
+    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='주문일시')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='수정일시')
     filled_at = models.DateTimeField(blank=True, null=True, verbose_name='체결일시')
@@ -1114,3 +1123,134 @@ class ExchangeFeeRebate(models.Model):
 
     def __str__(self):
         return f"{self.exchange_name} (페이백 {self.rebate_pct}%)"
+
+
+class PortfolioVisibility(models.TextChoices):
+    PUBLIC = 'PUBLIC', '공개'
+    PRIVATE = 'PRIVATE', '비공개'
+
+
+class Portfolio(models.Model):
+    """
+    비중 미러링 포트폴리오. 여러 종목의 목표 비중(target_weight_percent)을 정의하고,
+    PortfolioLink로 연동된 계좌는 비중 변경 시 즉시 리밸런싱된다.
+
+    포트폴리오는 단일 통화로 구성한다 (holdings의 symbol.currency가 모두 동일해야 함).
+    향후 수수료 확장 (미구현 — trading.strategy_fees 참고 패턴 재사용 예정):
+      - 구독(PortfolioLink) 시 과금하려면 strategy_fees.py와 동일한 훅 방식을 따른다.
+    """
+    owner = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='portfolios',
+        verbose_name='소유자'
+    )
+    title = models.CharField(max_length=100, verbose_name='제목')
+    description = models.TextField(blank=True, default='', verbose_name='설명')
+    visibility = models.CharField(
+        max_length=10,
+        choices=PortfolioVisibility.choices,
+        default=PortfolioVisibility.PRIVATE,
+        verbose_name='공개 범위'
+    )
+    order_type = models.CharField(
+        max_length=10,
+        choices=OrderType.choices,
+        default=OrderType.MARKET,
+        verbose_name='주문 타입'
+    )
+    enabled = models.BooleanField(default=True, verbose_name='활성 여부')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='생성일시')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='수정일시')
+
+    class Meta:
+        verbose_name = '포트폴리오'
+        verbose_name_plural = '포트폴리오들'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.title} ({self.visibility})"
+
+
+class PortfolioHolding(models.Model):
+    """포트폴리오 구성 종목과 목표 비중"""
+    portfolio = models.ForeignKey(
+        Portfolio,
+        on_delete=models.CASCADE,
+        related_name='holdings',
+        verbose_name='포트폴리오'
+    )
+    symbol = models.ForeignKey(
+        Symbol,
+        on_delete=models.CASCADE,
+        related_name='portfolio_holdings',
+        verbose_name='종목'
+    )
+    target_weight_percent = models.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        verbose_name='목표 비중 (%)',
+        help_text='포트폴리오 시드 대비 이 종목의 목표 비중'
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='생성일시')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='수정일시')
+
+    class Meta:
+        verbose_name = '포트폴리오 종목'
+        verbose_name_plural = '포트폴리오 종목들'
+        ordering = ['-target_weight_percent']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['portfolio', 'symbol'],
+                name='unique_portfolio_symbol'
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.portfolio.title} / {self.symbol.ticker} {self.target_weight_percent}%"
+
+
+class PortfolioLink(models.Model):
+    """계좌 ↔ 포트폴리오 구독(연동). seed_amount 기준으로 목표 비중을 그대로 미러링한다."""
+    portfolio = models.ForeignKey(
+        Portfolio,
+        on_delete=models.CASCADE,
+        related_name='links',
+        verbose_name='포트폴리오'
+    )
+    account = models.ForeignKey(
+        Account,
+        on_delete=models.CASCADE,
+        related_name='portfolio_links',
+        verbose_name='계좌'
+    )
+    seed_amount = models.DecimalField(
+        max_digits=20,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.01'))],
+        verbose_name='고정 시드 금액'
+    )
+    seed_currency = models.CharField(
+        max_length=10,
+        choices=Currency.choices,
+        default=Currency.KRW,
+        verbose_name='시드 통화'
+    )
+    enabled = models.BooleanField(default=True, verbose_name='연동 활성')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='생성일시')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='수정일시')
+
+    class Meta:
+        verbose_name = '포트폴리오 연동'
+        verbose_name_plural = '포트폴리오 연동들'
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['portfolio', 'account'],
+                name='unique_portfolio_account_link'
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.portfolio.title} ↔ {self.account_id}"
