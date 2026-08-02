@@ -413,13 +413,13 @@ def update_holdings(account: Account, holdings_data: list):
         else:
             symbol_currency = Currency.KRW
         
-        # Symbol 찾기 또는 생성 (티커는 전역 unique)
+        # Symbol 찾기 또는 생성 (티커는 브로커별 unique)
         symbol, _ = Symbol.objects.get_or_create(
             ticker=ticker,
+            broker=account.broker,
             defaults={
                 'name': holding_info.get('name', ticker),
                 'currency': symbol_currency,
-                'broker': account.broker,
                 'is_crypto': account.broker.is_crypto_exchange,
             }
         )

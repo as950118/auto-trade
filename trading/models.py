@@ -56,7 +56,7 @@ class Broker(models.Model):
 
 class Symbol(models.Model):
     """종목 (주식 티커, 암호화폐 티커 등)"""
-    ticker = models.CharField(max_length=50, unique=True, verbose_name='티커')
+    ticker = models.CharField(max_length=50, verbose_name='티커')
     name = models.CharField(max_length=200, verbose_name='종목명')
     currency = models.CharField(
         max_length=10,
@@ -78,6 +78,9 @@ class Symbol(models.Model):
         verbose_name = '종목'
         verbose_name_plural = '종목들'
         ordering = ['ticker']
+        constraints = [
+            models.UniqueConstraint(fields=['broker', 'ticker'], name='unique_broker_ticker'),
+        ]
 
     def __str__(self):
         return f"{self.ticker} ({self.name})"
