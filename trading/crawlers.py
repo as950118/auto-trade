@@ -35,7 +35,9 @@ class StockCrawler:
                 # FinanceDataReader를 사용하여 한국 주식 종목 목록 가져오기
                 try:
                     # KRX 상장 종목 목록 가져오기
-                    stock_list = fdr.StockListing('KRX')
+                    # 'KRX'(시세 API)는 data.krx.co.kr의 세션 검증 강화로 LOGOUT 오류 발생 -
+                    # 종목 기본정보만 필요하므로 'KRX-DESC'(상장회사 목록 API)를 사용
+                    stock_list = fdr.StockListing('KRX-DESC')
                     
                     if stock_list is not None and not stock_list.empty:
                         for _, row in stock_list.iterrows():
@@ -223,36 +225,39 @@ class StockCrawler:
                 Symbol.objects.filter(broker=broker, is_crypto=False)
                 .values_list('ticker', flat=True)
             )
-            
+
             current_tickers = set()
-            
+            symbols = []
+
             for stock in stocks:
                 ticker = stock.get('ticker')
                 name = stock.get('name')
                 currency = stock.get('currency', 'KRW' if broker.country == Country.KOREA else 'USD')
-                
+
                 if not ticker or not name:
                     continue
-                
+
                 current_tickers.add(ticker)
-                
-                symbol, created = Symbol.objects.update_or_create(
+                symbols.append(Symbol(
                     ticker=ticker,
                     broker=broker,
-                    defaults={
-                        'name': name,
-                        'currency': currency,
-                        'is_crypto': False,
-                        'is_delisted': False,
-                        'updated_at': timezone.now()
-                    }
+                    name=name,
+                    currency=currency,
+                    is_crypto=False,
+                    is_delisted=False,
+                ))
+
+            # 종목 수가 많을 수 있어 건별 update_or_create 대신 일괄 upsert로 처리
+            # (네트워크 왕복이 많으면 원격 DB 커넥션이 중간에 끊길 수 있음)
+            BATCH_SIZE = 500
+            for i in range(0, len(symbols), BATCH_SIZE):
+                Symbol.objects.bulk_create(
+                    symbols[i:i + BATCH_SIZE],
+                    update_conflicts=True,
+                    unique_fields=['broker', 'ticker'],
+                    update_fields=['name', 'currency', 'is_crypto', 'is_delisted'],
                 )
-                
-                if created:
-                    logger.info(f"새 주식 종목 추가: {ticker} ({name})")
-                else:
-                    logger.debug(f"주식 종목 업데이트: {ticker} ({name})")
-            
+
             # 상장폐지 처리: 현재 목록에 없지만 DB에 있는 종목
             delisted_tickers = existing_tickers - current_tickers
             if delisted_tickers:
@@ -262,9 +267,9 @@ class StockCrawler:
                     is_crypto=False
                 ).update(is_delisted=True, updated_at=timezone.now())
                 logger.info(f"상장폐지 처리된 종목 수: {len(delisted_tickers)}")
-            
+
             logger.info(f"주식 종목 크롤링 완료: {len(current_tickers)}개 종목")
-            
+
         except Exception as e:
             logger.error(f"주식 종목 업데이트 실패: {str(e)}")
 
@@ -279,7 +284,8 @@ class CryptoCrawler:
             logger.info("Upbit 암호화폐 종목 크롤링 시작")
             
             # Upbit에서 거래 가능한 모든 마켓 조회
-            markets = pyupbit.get_market_all()
+            # pyupbit 0.2.x에서 get_market_all()이 제거되어 get_tickers(verbose=True)로 대체
+            markets = pyupbit.get_tickers(verbose=True)
             
             if not markets:
                 logger.warning("Upbit 마켓 정보를 가져올 수 없습니다.")
@@ -329,36 +335,42 @@ class CryptoCrawler:
                 Symbol.objects.filter(broker=broker, is_crypto=True)
                 .values_list('ticker', flat=True)
             )
-            
-            current_tickers = set()
-            
+
+            # 같은 코인이 KRW/BTC/USDT 등 여러 마켓으로 상장돼 있으면 ticker가 동일해지므로
+            # (예: KRW-BTC, USDT-BTC 모두 ticker="BTC") ticker 기준으로 중복을 제거해야
+            # bulk_create의 ON CONFLICT가 같은 배치 내에서 동일 행을 두 번 갱신하는 오류를 피할 수 있음
+            symbols_by_ticker = {}
+
             for crypto in cryptos:
                 ticker = crypto.get('ticker')
                 name = crypto.get('name')
                 currency = crypto.get('currency', Currency.USDT)
-                
+
                 if not ticker or not name:
                     continue
-                
-                current_tickers.add(ticker)
-                
-                symbol, created = Symbol.objects.update_or_create(
+
+                symbols_by_ticker[ticker] = Symbol(
                     ticker=ticker,
                     broker=broker,
-                    defaults={
-                        'name': name,
-                        'currency': currency,
-                        'is_crypto': True,
-                        'is_delisted': False,
-                        'updated_at': timezone.now()
-                    }
+                    name=name,
+                    currency=currency,
+                    is_crypto=True,
+                    is_delisted=False,
                 )
-                
-                if created:
-                    logger.info(f"새 암호화폐 종목 추가: {ticker} ({name})")
-                else:
-                    logger.debug(f"암호화폐 종목 업데이트: {ticker} ({name})")
-            
+
+            current_tickers = set(symbols_by_ticker.keys())
+            symbols = list(symbols_by_ticker.values())
+
+            # 종목 수가 많을 수 있어 건별 update_or_create 대신 일괄 upsert로 처리
+            BATCH_SIZE = 500
+            for i in range(0, len(symbols), BATCH_SIZE):
+                Symbol.objects.bulk_create(
+                    symbols[i:i + BATCH_SIZE],
+                    update_conflicts=True,
+                    unique_fields=['broker', 'ticker'],
+                    update_fields=['name', 'currency', 'is_crypto', 'is_delisted'],
+                )
+
             # 상장폐지 처리: 현재 목록에 없지만 DB에 있는 종목
             delisted_tickers = existing_tickers - current_tickers
             if delisted_tickers:
@@ -368,7 +380,7 @@ class CryptoCrawler:
                     is_crypto=True
                 ).update(is_delisted=True, updated_at=timezone.now())
                 logger.info(f"상장폐지 처리된 암호화폐 종목 수: {len(delisted_tickers)}")
-            
+
             logger.info(f"암호화폐 종목 크롤링 완료: {len(current_tickers)}개 종목")
             
         except Exception as e:
