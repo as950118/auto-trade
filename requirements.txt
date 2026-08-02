@@ -11,6 +11,7 @@ finance-datareader==0.9.100
 gunicorn==23.0.0
 lxml==6.0.2
 pandas==2.3.3
+pdfplumber==0.11.8
 psycopg2-binary==2.9.12
 pyOpenSSL==26.3.0
 python-dotenv==1.2.1
