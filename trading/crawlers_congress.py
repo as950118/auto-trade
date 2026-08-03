@@ -242,14 +242,17 @@ def ingest_house_trades(years: Optional[List[int]] = None) -> Tuple[int, Set[int
 
 def crawl_congress_trades() -> Dict:
     """스케줄러/관리커맨드에서 호출하는 진입점. 신규 거래 반영 + 영향받은 의원 포트폴리오 동기화."""
-    from .services.congress_portfolio import sync_member_portfolio
+    from .services.congress_portfolio import sync_member_portfolio_resilient
     from .models import CongressMember
 
     new_trades, touched_member_ids = ingest_house_trades()
 
     synced_members = 0
     for member in CongressMember.objects.filter(id__in=touched_member_ids):
-        sync_member_portfolio(member)
-        synced_members += 1
+        try:
+            sync_member_portfolio_resilient(member)
+            synced_members += 1
+        except Exception:
+            logger.exception("congress crawl: portfolio sync failed for member=%s", member.id)
 
     return {"new_trades": new_trades, "synced_members": synced_members}

@@ -10,12 +10,14 @@ Portfolio 자체의 CRUD/리밸런싱 계약(단일 통화, 비중 합 <= 100)�
 from __future__ import annotations
 
 import logging
+import time
 from decimal import ROUND_DOWN, Decimal
 from typing import Dict
 
 from django.conf import settings
 from django.contrib.auth.models import User
-from django.db import transaction
+from django.db import close_old_connections, transaction
+from django.db.utils import OperationalError
 from django.utils import timezone
 
 from ..models import (
@@ -32,6 +34,8 @@ logger = logging.getLogger(__name__)
 
 WEIGHT_QUANT = Decimal("0.01")
 MAX_HOLDINGS_DEFAULT = 20
+DB_RETRY_ATTEMPTS = 3
+DB_RETRY_BACKOFF_SECONDS = 2
 
 
 def get_or_create_system_owner() -> User:
@@ -144,12 +148,34 @@ def sync_member_portfolio(member: CongressMember, max_holdings: int = MAX_HOLDIN
     return portfolio
 
 
+def sync_member_portfolio_resilient(member: CongressMember, max_holdings: int = MAX_HOLDINGS_DEFAULT) -> Portfolio:
+    """
+    sync_member_portfolio를 원격 DB 연결 끊김(OperationalError, 예: "server closed the
+    connection unexpectedly")에 대해 재시도한다. 매 시도 전 close_old_connections()로
+    죽은 커넥션을 버려 다음 쿼리가 새 커넥션을 맺도록 한다.
+    """
+    last_error: OperationalError | None = None
+    for attempt in range(DB_RETRY_ATTEMPTS):
+        try:
+            return sync_member_portfolio(member, max_holdings=max_holdings)
+        except OperationalError as e:
+            last_error = e
+            close_old_connections()
+            logger.warning(
+                "congress portfolio sync: DB 연결 오류로 재시도(%s/%s) member=%s: %s",
+                attempt + 1, DB_RETRY_ATTEMPTS, member.id, e,
+            )
+            if attempt < DB_RETRY_ATTEMPTS - 1:
+                time.sleep(DB_RETRY_BACKOFF_SECONDS)
+    raise last_error
+
+
 def sync_all_portfolios() -> int:
     """거래 내역이 있는 모든 CongressMember의 포트폴리오를 동기화한다. 반환값: 동기화된 의원 수."""
     count = 0
     for member in CongressMember.objects.filter(trades__isnull=False).distinct():
         try:
-            sync_member_portfolio(member)
+            sync_member_portfolio_resilient(member)
             count += 1
         except Exception:
             logger.exception("congress portfolio sync failed for member=%s", member.id)
