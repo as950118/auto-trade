@@ -191,8 +191,8 @@ class StockCrawler:
             # FinanceDataReader 사용 (일본 주식 지원)
             if FDR_AVAILABLE:
                 try:
-                    # 일본 주식 상장 종목
-                    japan_list = fdr.StockListing('JPX')
+                    # 일본 주식 상장 종목 (FinanceDataReader는 'TSE' 코드로 도쿄증권거래소 종목을 제공)
+                    japan_list = fdr.StockListing('TSE')
                     if japan_list is not None and not japan_list.empty:
                         for _, row in japan_list.iterrows():
                             ticker = str(row.get('Symbol', '')).strip()
@@ -202,7 +202,7 @@ class StockCrawler:
                                 stocks.append({
                                     'ticker': ticker,
                                     'name': name,
-                                    'currency': Currency.USD  # 일본 주식은 JPY이지만 시스템에서는 USD로 처리 (필요시 JPY 추가 가능)
+                                    'currency': Currency.JPY
                                 })
                         logger.info(f"일본 주식 종목 {len(stocks)}개 수집 완료")
                 except Exception as e:
@@ -226,16 +226,25 @@ class StockCrawler:
                 .values_list('ticker', flat=True)
             )
 
-            current_tickers = set()
-            symbols = []
-
+            # 같은 티커가 소스 목록에 중복으로 나타날 수 있어(예: 동일 종목이 복수 거래소 목록에 겹침)
+            # 티커 기준으로 먼저 dedup하지 않으면 bulk_create의 ON CONFLICT DO UPDATE가
+            # 같은 배치 안에서 동일 행을 두 번 건드리게 되어 DB 오류가 발생함
+            deduped = {}
             for stock in stocks:
                 ticker = stock.get('ticker')
                 name = stock.get('name')
-                currency = stock.get('currency', 'KRW' if broker.country == Country.KOREA else 'USD')
 
                 if not ticker or not name:
                     continue
+
+                deduped[ticker] = stock
+
+            current_tickers = set()
+            symbols = []
+
+            for ticker, stock in deduped.items():
+                name = stock.get('name')
+                currency = stock.get('currency', 'KRW' if broker.country == Country.KOREA else 'USD')
 
                 current_tickers.add(ticker)
                 symbols.append(Symbol(
