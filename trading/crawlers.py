@@ -226,9 +226,11 @@ class StockCrawler:
                 .values_list('ticker', flat=True)
             )
 
-            current_tickers = set()
-            symbols = []
-
+            # ticker 기준 dict로 모아 동일 배치 내 중복을 제거한다.
+            # (bulk_create(update_conflicts=True)는 한 배치 안에 같은 unique_fields 조합이
+            #  두 번 나오면 "ON CONFLICT DO UPDATE command cannot affect row a second time"로
+            #  배치 전체가 실패한다 - 소스 데이터 자체에 중복 티커가 섞여 있어도 안전하도록 방어)
+            symbols_by_ticker = {}
             for stock in stocks:
                 ticker = stock.get('ticker')
                 name = stock.get('name')
@@ -237,15 +239,17 @@ class StockCrawler:
                 if not ticker or not name:
                     continue
 
-                current_tickers.add(ticker)
-                symbols.append(Symbol(
+                symbols_by_ticker[ticker] = Symbol(
                     ticker=ticker,
                     broker=broker,
                     name=name,
                     currency=currency,
                     is_crypto=False,
                     is_delisted=False,
-                ))
+                )
+
+            current_tickers = set(symbols_by_ticker.keys())
+            symbols = list(symbols_by_ticker.values())
 
             # 종목 수가 많을 수 있어 건별 update_or_create 대신 일괄 upsert로 처리
             # (네트워크 왕복이 많으면 원격 DB 커넥션이 중간에 끊길 수 있음)

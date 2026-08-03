@@ -306,10 +306,11 @@ def crawl_congress_trades_job():
 
     try:
         result = crawl_congress_trades()
-        if result['new_trades'] > 0:
+        if result['new_trades'] > 0 or result['resolved_symbols'] > 0:
             message = (
                 f"✅ 의회 공시 크롤링 완료\n\n"
                 f"신규 거래: {result['new_trades']}건\n"
+                f"뒤늦게 매칭된 종목: {result['resolved_symbols']}건\n"
                 f"갱신된 포트폴리오: {result['synced_members']}개"
             )
             notify_scheduler(message, job_name="의회 공시 크롤링")

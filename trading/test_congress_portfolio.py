@@ -144,6 +144,49 @@ class IngestHouseTradesTestCase(TestCase):
         self.assertEqual(CongressTrade.objects.count(), 1)
 
 
+class ResolvePendingSymbolsTestCase(TestCase):
+    """심볼 크롤링이 나중에 보강되어 과거에 매칭 실패했던 CongressTrade가 뒤늦게 매칭되는 경우"""
+
+    def setUp(self):
+        self.broker = Broker.objects.create(
+            code="TESTUS3", name="Test US Broker 3", country=Country.USA, is_crypto_exchange=False
+        )
+        self.member = CongressMember.objects.create(name="Late Match Member", chamber=CongressChamber.HOUSE)
+        # Symbol이 아직 없는 시점에 매칭 실패한 채로 저장된 거래
+        self.trade = CongressTrade.objects.create(
+            member=self.member,
+            symbol=None,
+            raw_ticker="NEWSYM",
+            transaction_type="BUY",
+            transaction_date=date(2025, 1, 1),
+            amount_min=Decimal("1001"),
+            amount_max=Decimal("15000"),
+            source_url="test://newsym",
+            crawled_at=timezone.now(),
+        )
+
+    def test_resolves_previously_unmatched_ticker_once_symbol_exists(self):
+        resolved_count, touched_ids = crawlers_congress.resolve_pending_symbols()
+        self.assertEqual(resolved_count, 0)
+        self.assertEqual(touched_ids, set())
+
+        symbol = Symbol.objects.create(
+            ticker="NEWSYM", name="New Symbol Co", currency=Currency.USD, broker=self.broker,
+        )
+
+        resolved_count, touched_ids = crawlers_congress.resolve_pending_symbols()
+        self.assertEqual(resolved_count, 1)
+        self.assertEqual(touched_ids, {self.member.id})
+        self.trade.refresh_from_db()
+        self.assertEqual(self.trade.symbol, symbol)
+
+    def test_does_not_touch_trades_without_raw_ticker(self):
+        CongressTrade.objects.filter(pk=self.trade.pk).update(raw_ticker="")
+        resolved_count, touched_ids = crawlers_congress.resolve_pending_symbols()
+        self.assertEqual(resolved_count, 0)
+        self.assertEqual(touched_ids, set())
+
+
 class CongressPortfolioSyncTestCase(TestCase):
     def setUp(self):
         self.broker = Broker.objects.create(

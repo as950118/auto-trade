@@ -17,5 +17,6 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         result = crawl_congress_trades()
         self.stdout.write(self.style.SUCCESS(
-            f"신규 거래: {result['new_trades']}건 / 갱신된 포트폴리오: {result['synced_members']}개"
+            f"신규 거래: {result['new_trades']}건 / 뒤늦게 매칭된 종목: {result['resolved_symbols']}건 / "
+            f"갱신된 포트폴리오: {result['synced_members']}개"
         ))

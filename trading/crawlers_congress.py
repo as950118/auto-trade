@@ -155,6 +155,31 @@ def _resolve_symbol(ticker: str):
     )
 
 
+def resolve_pending_symbols() -> Tuple[int, Set[int]]:
+    """
+    symbol이 아직 매칭되지 않은(symbol=None) 기존 CongressTrade를 재조회한다.
+    Symbol 크롤링(crawl_symbols_job)은 별도 스케줄로 동작하므로, 의회 공시가 먼저
+    들어온 시점엔 매칭에 실패했던 티커도 이후 Symbol 테이블이 보강되면 뒤늦게
+    매칭될 수 있다 - 크롤링 주기마다 함께 재시도해 방치되지 않도록 한다.
+    반환: (새로 매칭된 건수, 영향받은 CongressMember id 집합)
+    """
+    from .models import CongressTrade
+
+    resolved_count = 0
+    touched_member_ids: Set[int] = set()
+
+    pending = CongressTrade.objects.filter(symbol__isnull=True).exclude(raw_ticker="")
+    for trade in pending:
+        symbol = _resolve_symbol(trade.raw_ticker)
+        if symbol:
+            trade.symbol = symbol
+            trade.save(update_fields=["symbol"])
+            resolved_count += 1
+            touched_member_ids.add(trade.member_id)
+
+    return resolved_count, touched_member_ids
+
+
 def ingest_house_trades(years: Optional[List[int]] = None) -> Tuple[int, Set[int]]:
     """
     하원 PTR을 크롤링하여 신규 CongressTrade를 반영한다.
@@ -246,6 +271,8 @@ def crawl_congress_trades() -> Dict:
     from .models import CongressMember
 
     new_trades, touched_member_ids = ingest_house_trades()
+    resolved_symbols, resolved_member_ids = resolve_pending_symbols()
+    touched_member_ids |= resolved_member_ids
 
     synced_members = 0
     for member in CongressMember.objects.filter(id__in=touched_member_ids):
@@ -255,4 +282,4 @@ def crawl_congress_trades() -> Dict:
         except Exception:
             logger.exception("congress crawl: portfolio sync failed for member=%s", member.id)
 
-    return {"new_trades": new_trades, "synced_members": synced_members}
+    return {"new_trades": new_trades, "resolved_symbols": resolved_symbols, "synced_members": synced_members}
