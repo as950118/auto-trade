@@ -10,6 +10,7 @@ class Currency(models.TextChoices):
     """화폐단위 ENUM"""
     KRW = 'KRW', '원'
     USD = 'USD', '달러'
+    JPY = 'JPY', '엔'
     USDT = 'USDT', '테더'
     BTC = 'BTC', '비트코인'
     ETH = 'ETH', '이더리움'
