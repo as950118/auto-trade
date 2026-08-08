@@ -114,6 +114,12 @@ ORDER_PROCESSING_INTERVAL_MINUTES = 1
 # 종목 크롤링 간격 (시간 단위, 기본값: 1시간)
 SYMBOL_CRAWL_INTERVAL_HOURS = 1
 
+# 의회 공시(PTR) 크롤링 간격 (시간 단위, 기본값: 24시간)
+CONGRESS_CRAWL_INTERVAL_HOURS = 24
+
+# 의회 미러링 포트폴리오를 소유하는 시스템 계정 (PUBLIC 포트폴리오 생성 요건상 is_staff로 자동 생성됨)
+CONGRESS_PORTFOLIO_OWNER_USERNAME = 'congress_bot'
+
 # Telegram 알림 설정
 TELEGRAM_NEW_CUSTOMER = {
     'token': '6531210607:AAH12INQhJY-s87ygzSQ6KYnrooc9o44e84',

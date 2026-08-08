@@ -95,7 +95,17 @@ def start_scheduler():
         name='수수료 환급 크롤링',
         replace_existing=True,
     )
-    
+
+    # 미 하원의원 공시 거래(PTR) 크롤링 (기본 24시간마다)
+    congress_crawl_interval_hours = getattr(settings, 'CONGRESS_CRAWL_INTERVAL_HOURS', 24)
+    scheduler.add_job(
+        crawl_congress_trades_job,
+        trigger=IntervalTrigger(hours=congress_crawl_interval_hours),
+        id='crawl_congress_trades',
+        name='의회 공시 크롤링',
+        replace_existing=True,
+    )
+
     register_events(scheduler)
     
     try:
@@ -286,6 +296,29 @@ def crawl_fee_rebates_job():
         notify_scheduler(
             f"❌ 수수료 환급 크롤링 실패\n\n오류: {str(e)}",
             job_name="수수료 환급 크롤링",
+        )
+
+
+def crawl_congress_trades_job():
+    """미 하원의원 공시 거래(PTR) 크롤링 작업 (스케줄러에서 호출)"""
+    from .crawlers_congress import crawl_congress_trades
+    from .notifications import notify_scheduler
+
+    try:
+        result = crawl_congress_trades()
+        if result['new_trades'] > 0 or result['resolved_symbols'] > 0:
+            message = (
+                f"✅ 의회 공시 크롤링 완료\n\n"
+                f"신규 거래: {result['new_trades']}건\n"
+                f"뒤늦게 매칭된 종목: {result['resolved_symbols']}건\n"
+                f"갱신된 포트폴리오: {result['synced_members']}개"
+            )
+            notify_scheduler(message, job_name="의회 공시 크롤링")
+    except Exception as e:
+        logger.exception("의회 공시 크롤링 중 오류: %s", e)
+        notify_scheduler(
+            f"❌ 의회 공시 크롤링 실패\n\n오류: {str(e)}",
+            job_name="의회 공시 크롤링",
         )
 
 

@@ -17,6 +17,7 @@ from .models import (
     Order, Account, Symbol, Broker, Country, OrderStatus, DailyRealizedProfit, Holding,
     TargetAllocationPlan, ExchangeFeeRebate, Strategy, StrategyLink, StrategyVisibility,
     AlertEvent, AlertTradePlan, Portfolio, PortfolioHolding, PortfolioLink, PortfolioVisibility,
+    CongressMember,
 )
 from .serializers import (
     OrderCreateSerializer, OrderSerializer, OrderUpdateSerializer,
@@ -26,6 +27,7 @@ from .serializers import (
     ExchangeFeeRebateSerializer,
     StrategySerializer, StrategyLinkSerializer, AlertEventSerializer, AlertTradePlanSerializer,
     PortfolioSerializer, PortfolioHoldingSerializer, PortfolioLinkSerializer,
+    CongressMemberSerializer,
 )
 from .services.portfolio import rebalance_link, rebalance_portfolio
 from .profit_calculator import ProfitCalculator
@@ -826,6 +828,18 @@ class PortfolioLinkViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         link = serializer.save()
         rebalance_link(link)
+
+
+class CongressMemberViewSet(viewsets.ReadOnlyModelViewSet):
+    """의회의원(공시 거래 미러링 대상) 조회 전용"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = CongressMemberSerializer
+    queryset = CongressMember.objects.all()
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter, filters.SearchFilter]
+    filterset_fields = ['chamber', 'state']
+    search_fields = ['name']
+    ordering_fields = ['name', 'last_synced_at']
+    ordering = ['name']
 
 
 class AlertEventViewSet(viewsets.ReadOnlyModelViewSet):

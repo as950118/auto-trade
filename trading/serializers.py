@@ -8,6 +8,7 @@ from .models import (
     TargetAllocationPlan, ExchangeFeeRebate,
     Strategy, StrategyLink, StrategyVisibility, AlertEvent, AlertTradePlan, AlertTradeLeg,
     Portfolio, PortfolioHolding, PortfolioLink, PortfolioVisibility,
+    CongressMember,
 )
 from .sell_quantity import (
     resolve_sell_quantity,
@@ -745,3 +746,20 @@ class AlertEventSerializer(serializers.ModelSerializer):
             'trade_plans', 'received_at', 'updated_at',
         ]
         read_only_fields = fields
+
+
+class CongressMemberSerializer(serializers.ModelSerializer):
+    """의회의원(공시 거래 미러링 대상) 시리얼라이저"""
+    chamber_display = serializers.CharField(source='get_chamber_display', read_only=True)
+    portfolio_id = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CongressMember
+        fields = [
+            'id', 'name', 'chamber', 'chamber_display', 'party', 'state',
+            'portfolio_id', 'last_synced_at', 'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
+
+    def get_portfolio_id(self, obj):
+        return obj.portfolio_id

@@ -1258,3 +1258,99 @@ class PortfolioLink(models.Model):
 
     def __str__(self):
         return f"{self.portfolio.title} ↔ {self.account_id}"
+
+
+class CongressChamber(models.TextChoices):
+    """미 의회 상/하원 ENUM"""
+    SENATE = 'SENATE', '상원'
+    HOUSE = 'HOUSE', '하원'
+
+
+class CongressTransactionType(models.TextChoices):
+    """의회 공시 거래유형 ENUM"""
+    BUY = 'BUY', '매수'
+    SELL = 'SELL', '매도'
+    EXCHANGE = 'EXCHANGE', '교환'
+
+
+class CongressMember(models.Model):
+    """미 의회의원 (STOCK Act 공시 추적 대상)"""
+    name = models.CharField(max_length=200, verbose_name='이름')
+    chamber = models.CharField(
+        max_length=10,
+        choices=CongressChamber.choices,
+        verbose_name='상/하원'
+    )
+    party = models.CharField(max_length=50, blank=True, default='', verbose_name='정당')
+    state = models.CharField(max_length=2, blank=True, default='', verbose_name='주')
+    portfolio = models.OneToOneField(
+        Portfolio,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='congress_member',
+        verbose_name='연동 포트폴리오'
+    )
+    last_synced_at = models.DateTimeField(null=True, blank=True, verbose_name='마지막 동기화 시각')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='생성일시')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='수정일시')
+
+    class Meta:
+        verbose_name = '의회의원'
+        verbose_name_plural = '의회의원들'
+        ordering = ['name']
+        constraints = [
+            models.UniqueConstraint(fields=['name', 'chamber'], name='unique_congress_member'),
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.get_chamber_display()})"
+
+
+class CongressTrade(models.Model):
+    """의회의원 공시 거래 1건 (Senate/House Stock Watcher 공개 데이터 기반)"""
+    member = models.ForeignKey(
+        CongressMember,
+        on_delete=models.CASCADE,
+        related_name='trades',
+        verbose_name='의원'
+    )
+    symbol = models.ForeignKey(
+        Symbol,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='congress_trades',
+        verbose_name='매칭된 종목'
+    )
+    raw_ticker = models.CharField(
+        max_length=50, blank=True, default='', verbose_name='원본 티커',
+        help_text='Symbol 매칭 실패 시(채권/옵션/비상장 등) 원본 텍스트 보관'
+    )
+    asset_description = models.CharField(max_length=300, blank=True, default='', verbose_name='자산 설명')
+    transaction_type = models.CharField(
+        max_length=10,
+        choices=CongressTransactionType.choices,
+        verbose_name='거래유형'
+    )
+    transaction_date = models.DateField(verbose_name='거래일')
+    disclosure_date = models.DateField(null=True, blank=True, verbose_name='공시일')
+    amount_min = models.DecimalField(max_digits=20, decimal_places=2, verbose_name='거래금액 최소')
+    amount_max = models.DecimalField(max_digits=20, decimal_places=2, verbose_name='거래금액 최대')
+    source_url = models.CharField(max_length=500, blank=True, default='', verbose_name='출처 URL')
+    crawled_at = models.DateTimeField(verbose_name='크롤링 시각')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='생성일시')
+
+    class Meta:
+        verbose_name = '의회 공시 거래'
+        verbose_name_plural = '의회 공시 거래들'
+        ordering = ['-transaction_date']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['member', 'raw_ticker', 'transaction_type', 'transaction_date', 'amount_min', 'amount_max'],
+                name='unique_congress_trade',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.member.name} {self.get_transaction_type_display()} {self.raw_ticker} ({self.transaction_date})"
