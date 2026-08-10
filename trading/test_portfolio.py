@@ -20,6 +20,7 @@ from .models import (
     PortfolioLink,
     PortfolioVisibility,
     Symbol,
+    TargetAllocationPlan,
 )
 from .services.portfolio import rebalance_link, rebalance_portfolio
 
@@ -67,6 +68,21 @@ class PortfolioRebalanceTestCase(TestCase):
             account=self.account,
             seed_amount=Decimal('1000000'),
             seed_currency=Currency.KRW,
+        )
+        self.stock_broker = Broker.objects.create(
+            code='KIS2', name='한국투자증권2', country=Country.KOREA, is_crypto_exchange=False
+        )
+        self.stock_account = Account.objects.create(
+            user=self.owner,
+            broker=self.stock_broker,
+            api_key='k4',
+            api_secret='s4',
+            cash_balance_krw=Decimal('10000000'),
+            buy_enabled=True,
+            sell_enabled=True,
+        )
+        self.samsung = Symbol.objects.create(
+            ticker='005930', name='Samsung', currency=Currency.KRW, broker=self.stock_broker, is_crypto=False,
         )
 
     def test_weight_sum_over_100_rejected_via_holdings_action(self):
@@ -184,3 +200,76 @@ class PortfolioRebalanceTestCase(TestCase):
         )
         self.assertEqual(resp.status_code, 201)
         self.assertTrue(Order.objects.filter(account=other_account).exists())
+
+    def test_asset_class_mismatch_rejected_via_portfolio_link(self):
+        """PRD-0003 AC-2: 크립토 종목만 보유한 포트폴리오는 주식 브로커 계좌에 연동할 수 없다."""
+        client = APIClient()
+        client.force_authenticate(user=self.owner)
+        resp = client.post(
+            '/api/portfolio-links/',
+            {
+                'portfolio_id': self.portfolio.id,
+                'account_id': self.stock_account.id,
+                'seed_amount': '500000',
+                'seed_currency': Currency.KRW,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('account_id', resp.data)
+
+    def test_rebalance_link_skips_broker_mismatched_holding(self):
+        """PRD-0003 AC-5: 이미 존재하는 불일치 링크는 주문을 만들지 않고 로그만 남긴다."""
+        mismatched_portfolio = Portfolio.objects.create(owner=self.owner, title='Broken Mix')
+        PortfolioHolding.objects.create(
+            portfolio=mismatched_portfolio, symbol=self.samsung, target_weight_percent=Decimal('100')
+        )
+        # AC-2가 정상 경로에서는 막지만, 기존에 이미 불일치 데이터가 있을 가능성에 대비해
+        # 서버 검증을 우회하고 모델을 직접 생성해 방어 코드 경로를 검증한다.
+        mismatched_link = PortfolioLink.objects.create(
+            portfolio=mismatched_portfolio,
+            account=self.account,
+            seed_amount=Decimal('1000000'),
+            seed_currency=Currency.KRW,
+        )
+
+        with self.assertLogs('trading.services.portfolio', level='WARNING') as captured:
+            created = rebalance_link(mismatched_link)
+
+        self.assertEqual(created, 0)
+        self.assertFalse(Order.objects.filter(account=self.account, symbol=self.samsung).exists())
+        self.assertTrue(any('broker mismatch' in message for message in captured.output))
+
+    def test_target_allocation_plan_asset_class_mismatch_rejected(self):
+        """PRD-0003 AC-3: 크립토 종목을 주식 전용 계좌 계획으로 만들 수 없다."""
+        client = APIClient()
+        client.force_authenticate(user=self.owner)
+        resp = client.post(
+            '/api/target-allocation-plans/',
+            {
+                'account_id': self.stock_account.id,
+                'symbol_id': self.btc.id,
+                'target_ratio': '0.2',
+                'total_days': 10,
+                'num_trades': 5,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('symbol_id', resp.data)
+
+    def test_target_allocation_plan_compatible_asset_class_accepted(self):
+        client = APIClient()
+        client.force_authenticate(user=self.owner)
+        resp = client.post(
+            '/api/target-allocation-plans/',
+            {
+                'account_id': self.stock_account.id,
+                'symbol_id': self.samsung.id,
+                'target_ratio': '0.2',
+                'total_days': 10,
+                'num_trades': 5,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201)

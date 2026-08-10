@@ -480,6 +480,15 @@ class TargetAllocationPlanSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('목표 비율은 0~1 사이여야 합니다. (예: 0.2 = 20%)')
         return value
 
+    def validate(self, attrs):
+        account = attrs.get('account_id') or getattr(self.instance, 'account', None)
+        symbol = attrs.get('symbol_id') or getattr(self.instance, 'symbol', None)
+        if account and symbol and symbol.is_crypto != account.broker.is_crypto_exchange:
+            raise serializers.ValidationError(
+                {'symbol_id': '종목의 자산군과 계좌의 거래소 자산군이 일치해야 합니다.'}
+            )
+        return attrs
+
     def create(self, validated_data):
         validated_data['account'] = validated_data.pop('account_id')
         validated_data['symbol'] = validated_data.pop('symbol_id')
@@ -700,6 +709,14 @@ class PortfolioLinkSerializer(serializers.ModelSerializer):
             if portfolio_currencies and seed_currency not in portfolio_currencies:
                 raise serializers.ValidationError(
                     {'seed_currency': '포트폴리오 종목 통화와 시드 통화가 일치해야 합니다.'}
+                )
+        if portfolio and account:
+            has_mismatched_asset_class = portfolio.holdings.exclude(
+                symbol__is_crypto=account.broker.is_crypto_exchange
+            ).exists()
+            if has_mismatched_asset_class:
+                raise serializers.ValidationError(
+                    {'account_id': '포트폴리오 종목의 자산군과 계좌의 거래소 자산군이 일치해야 합니다.'}
                 )
         return attrs
 

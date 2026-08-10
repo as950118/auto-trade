@@ -58,6 +58,12 @@ def rebalance_link(link: PortfolioLink) -> int:
 
     for holding in portfolio.holdings.select_related('symbol').all():
         symbol = holding.symbol
+        if symbol.broker_id != account.broker_id:
+            logger.warning(
+                'portfolio rebalance: symbol broker mismatch (symbol=%s broker=%s account=%s broker=%s), skip',
+                symbol.ticker, symbol.broker_id, account.id, account.broker_id,
+            )
+            continue
         try:
             target_value = (
                 link.seed_amount * holding.target_weight_percent / Decimal('100')
