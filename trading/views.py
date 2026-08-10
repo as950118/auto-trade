@@ -8,8 +8,9 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken
 from drf_spectacular.utils import extend_schema, OpenApiResponse
-from django.db import transaction
+from django.db import transaction, connection
 from django.db.models import Q
+from django.db.utils import OperationalError
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from decimal import Decimal
@@ -17,7 +18,7 @@ from .models import (
     Order, Account, Symbol, Broker, Country, OrderStatus, DailyRealizedProfit, Holding,
     TargetAllocationPlan, ExchangeFeeRebate, Strategy, StrategyLink, StrategyVisibility,
     AlertEvent, AlertTradePlan, Portfolio, PortfolioHolding, PortfolioLink, PortfolioVisibility,
-    CongressMember,
+    CongressMember, KrDisclosure, KrFinancialFact,
 )
 from .serializers import (
     OrderCreateSerializer, OrderSerializer, OrderUpdateSerializer,
@@ -27,7 +28,7 @@ from .serializers import (
     ExchangeFeeRebateSerializer,
     StrategySerializer, StrategyLinkSerializer, AlertEventSerializer, AlertTradePlanSerializer,
     PortfolioSerializer, PortfolioHoldingSerializer, PortfolioLinkSerializer,
-    CongressMemberSerializer,
+    CongressMemberSerializer, KrDisclosureSerializer, KrFinancialFactSerializer,
 )
 from .services.portfolio import rebalance_link, rebalance_portfolio
 from .profit_calculator import ProfitCalculator
@@ -82,6 +83,40 @@ def signup(request):
             status=status.HTTP_201_CREATED
         )
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@extend_schema(
+    summary='헬스체크',
+    description='배포/모니터링 파이프라인이 사용하는 상태 확인 엔드포인트입니다. DB 연결 상태를 함께 점검합니다.',
+    responses={
+        200: OpenApiResponse(description='서비스 정상'),
+        503: OpenApiResponse(description='의존 리소스(DB 등) 이상'),
+    },
+    tags=['시스템'],
+)
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def health_check(request):
+    """서비스/DB 상태를 점검하는 헬스체크 엔드포인트"""
+    checks = {}
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT 1')
+        checks['database'] = 'ok'
+        healthy = True
+    except OperationalError:
+        checks['database'] = 'unavailable'
+        healthy = False
+
+    payload = {
+        'status': 'ok' if healthy else 'error',
+        'timestamp': timezone.now().isoformat(),
+        'checks': checks,
+    }
+    return Response(
+        payload,
+        status=status.HTTP_200_OK if healthy else status.HTTP_503_SERVICE_UNAVAILABLE,
+    )
 
 
 @extend_schema(
@@ -840,6 +875,28 @@ class CongressMemberViewSet(viewsets.ReadOnlyModelViewSet):
     search_fields = ['name']
     ordering_fields = ['name', 'last_synced_at']
     ordering = ['name']
+
+
+class KrDisclosureViewSet(viewsets.ReadOnlyModelViewSet):
+    """국내(KR) 종목 공시 조회 (PRD-0004, API-0001) — 기존 인증 경계 그대로 따름, 무인증 없음"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = KrDisclosureSerializer
+    queryset = KrDisclosure.objects.select_related('symbol').all()
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filterset_fields = ['symbol']
+    ordering_fields = ['rcept_dt']
+    ordering = ['-rcept_dt']
+
+
+class KrFinancialFactViewSet(viewsets.ReadOnlyModelViewSet):
+    """국내(KR) 종목 분기 실적 조회 (PRD-0004, API-0001)"""
+    permission_classes = [IsAuthenticated]
+    serializer_class = KrFinancialFactSerializer
+    queryset = KrFinancialFact.objects.select_related('symbol').all()
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filterset_fields = ['symbol']
+    ordering_fields = ['bsns_year', 'reprt_code']
+    ordering = ['-bsns_year', '-reprt_code']
 
 
 class AlertEventViewSet(viewsets.ReadOnlyModelViewSet):

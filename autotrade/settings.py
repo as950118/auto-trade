@@ -97,6 +97,9 @@ GOOGLE_OAUTH2_CLIENT_SECRET = os.getenv('GOOGLE_OAUTH2_CLIENT_SECRET', '')
 # Frontend URL where Google redirects with ?code= (e.g. http://localhost:3000 or https://your-app.vercel.app)
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')
 
+# DART(전자공시) OpenAPI 인증키 — https://opendart.fss.or.kr/ 에서 발급 (PRD-0004/ARCH-0002)
+DART_API_KEY = os.getenv('DART_API_KEY', '')
+
 # 스케줄러 설정
 SCHEDULER_CONFIG = {
     "apscheduler.jobstores.default": {

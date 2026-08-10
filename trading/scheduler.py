@@ -106,6 +106,24 @@ def start_scheduler():
         replace_existing=True,
     )
 
+    # 국내(KR) 종목 DART 공시 크롤링 (평일 18:10 — 당일 공시 접수 마감 이후, ARCH-0002)
+    scheduler.add_job(
+        crawl_kr_disclosures_job,
+        trigger=CronTrigger(day_of_week='mon-fri', hour=18, minute=10),
+        id='crawl_kr_disclosures',
+        name='국내 종목 공시 크롤링',
+        replace_existing=True,
+    )
+
+    # 국내(KR) 종목 분기 실적 동기화 (매주 월요일 03:00 — 저빈도 정기 동기화, ARCH-0002)
+    scheduler.add_job(
+        sync_kr_earnings_job,
+        trigger=CronTrigger(day_of_week='mon', hour=3, minute=0),
+        id='sync_kr_earnings',
+        name='국내 종목 실적 동기화',
+        replace_existing=True,
+    )
+
     register_events(scheduler)
     
     try:
@@ -319,6 +337,67 @@ def crawl_congress_trades_job():
         notify_scheduler(
             f"❌ 의회 공시 크롤링 실패\n\n오류: {str(e)}",
             job_name="의회 공시 크롤링",
+        )
+
+
+def crawl_kr_disclosures_job():
+    """국내(KR) 종목 DART 공시 크롤링 작업 (스케줄러에서 호출, PRD-0004)"""
+    from .crawlers_kr_disclosure import crawl_kr_disclosures, sync_kr_corp_codes
+    from .crawlers_kr_earnings import sync_all_kr_earnings
+    from .dart_client import DartAPIError
+    from .notifications import notify_scheduler
+
+    try:
+        sync_kr_corp_codes()
+        result = crawl_kr_disclosures()
+        if result['earnings_trigger_symbols']:
+            sync_all_kr_earnings(symbol_ids=result['earnings_trigger_symbols'])
+        if result['new_disclosures'] > 0:
+            notify_scheduler(
+                f"✅ 국내 종목 공시 크롤링 완료\n\n신규 공시: {result['new_disclosures']}건",
+                job_name="국내 종목 공시 크롤링",
+            )
+    except DartAPIError as e:
+        logger.exception("국내 종목 공시 크롤링 중 DART API 오류: %s", e)
+        notify_scheduler(
+            f"❌ 국내 종목 공시 크롤링 실패(DART API)\n\n오류: {str(e)}",
+            job_name="국내 종목 공시 크롤링",
+        )
+    except Exception as e:
+        logger.exception("국내 종목 공시 크롤링 중 오류: %s", e)
+        notify_scheduler(
+            f"❌ 국내 종목 공시 크롤링 실패\n\n오류: {str(e)}",
+            job_name="국내 종목 공시 크롤링",
+        )
+
+
+def sync_kr_earnings_job():
+    """국내(KR) 종목 분기 실적 정기 동기화 작업 (스케줄러에서 호출, PRD-0004)"""
+    from .crawlers_kr_disclosure import sync_kr_corp_codes
+    from .crawlers_kr_earnings import sync_all_kr_earnings
+    from .dart_client import DartAPIError
+    from .notifications import notify_scheduler
+
+    try:
+        sync_kr_corp_codes()
+        result = sync_all_kr_earnings()
+        message = (
+            f"✅ 국내 종목 실적 동기화 완료\n\n"
+            f"갱신된 종목: {result['synced_symbols']}개\n"
+            f"실패(skip): {result['failed_symbols']}개"
+        )
+        notify_scheduler(message, job_name="국내 종목 실적 동기화")
+    except DartAPIError as e:
+        logger.exception("국내 종목 실적 동기화 중 DART API 오류: %s", e)
+        notify_scheduler(
+            f"❌ 국내 종목 실적 동기화 실패(DART API)\n\n오류: {str(e)}",
+            job_name="국내 종목 실적 동기화",
+        )
+    except Exception as e:
+        logger.exception("국내 종목 실적 동기화 중 오류: %s", e)
+        notify_scheduler(
+            f"❌ 국내 종목 실적 동기화 실패\n\n오류: {str(e)}",
+            job_name="국내 종목 실적 동기화",
         )
 
 

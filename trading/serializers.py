@@ -8,7 +8,7 @@ from .models import (
     TargetAllocationPlan, ExchangeFeeRebate,
     Strategy, StrategyLink, StrategyVisibility, AlertEvent, AlertTradePlan, AlertTradeLeg,
     Portfolio, PortfolioHolding, PortfolioLink, PortfolioVisibility,
-    CongressMember,
+    CongressMember, KrDisclosure, KrFinancialFact,
 )
 from .sell_quantity import (
     resolve_sell_quantity,
@@ -763,3 +763,73 @@ class CongressMemberSerializer(serializers.ModelSerializer):
 
     def get_portfolio_id(self, obj):
         return obj.portfolio_id
+
+
+class KrDisclosureSerializer(serializers.ModelSerializer):
+    """국내(KR) 종목 공시 시리얼라이저 (PRD-0004, API-0001)"""
+    symbol_ticker = serializers.CharField(source='symbol.ticker', read_only=True)
+    symbol_name = serializers.CharField(source='symbol.name', read_only=True)
+
+    class Meta:
+        model = KrDisclosure
+        fields = [
+            'id', 'symbol', 'symbol_ticker', 'symbol_name',
+            'rcept_no', 'report_name', 'rcept_dt', 'source_url',
+        ]
+        read_only_fields = fields
+
+
+class KrFinancialFactSerializer(serializers.ModelSerializer):
+    """국내(KR) 종목 분기 실적 시리얼라이저 (PRD-0004, API-0001)
+
+    *_yoy_pct는 저장된 컬럼이 아니라 조회 시점에 전년도 동일 reprt_code 행과 비교해 계산한다
+    (ARCH-0002 Data Model — 파생값 이중 저장 금지).
+    """
+    symbol_ticker = serializers.CharField(source='symbol.ticker', read_only=True)
+    symbol_name = serializers.CharField(source='symbol.name', read_only=True)
+    reprt_code_display = serializers.CharField(source='get_reprt_code_display', read_only=True)
+    revenue_yoy_pct = serializers.SerializerMethodField()
+    operating_profit_yoy_pct = serializers.SerializerMethodField()
+    net_profit_yoy_pct = serializers.SerializerMethodField()
+
+    class Meta:
+        model = KrFinancialFact
+        fields = [
+            'id', 'symbol', 'symbol_ticker', 'symbol_name',
+            'bsns_year', 'reprt_code', 'reprt_code_display', 'fs_div',
+            'revenue', 'operating_profit', 'net_profit',
+            'revenue_yoy_pct', 'operating_profit_yoy_pct', 'net_profit_yoy_pct',
+        ]
+        read_only_fields = fields
+
+    def _prior_year_fact(self, obj):
+        if hasattr(obj, '_prior_year_fact_cache'):
+            return obj._prior_year_fact_cache
+        prior = None
+        try:
+            prior_year = str(int(obj.bsns_year) - 1)
+            prior = KrFinancialFact.objects.filter(
+                symbol_id=obj.symbol_id, bsns_year=prior_year, reprt_code=obj.reprt_code
+            ).first()
+        except (TypeError, ValueError):
+            pass
+        obj._prior_year_fact_cache = prior
+        return prior
+
+    @staticmethod
+    def _yoy_pct(current, prior):
+        if current is None or prior is None or prior == 0:
+            return None
+        return round(float((current - prior) / abs(prior) * 100), 2)
+
+    def get_revenue_yoy_pct(self, obj):
+        prior = self._prior_year_fact(obj)
+        return self._yoy_pct(obj.revenue, prior.revenue if prior else None)
+
+    def get_operating_profit_yoy_pct(self, obj):
+        prior = self._prior_year_fact(obj)
+        return self._yoy_pct(obj.operating_profit, prior.operating_profit if prior else None)
+
+    def get_net_profit_yoy_pct(self, obj):
+        prior = self._prior_year_fact(obj)
+        return self._yoy_pct(obj.net_profit, prior.net_profit if prior else None)
