@@ -72,6 +72,13 @@ class Symbol(models.Model):
     )
     is_crypto = models.BooleanField(default=False, verbose_name='암호화폐 여부')
     is_delisted = models.BooleanField(default=False, verbose_name='상장폐지 여부')
+    dart_corp_code = models.CharField(
+        max_length=8,
+        null=True,
+        blank=True,
+        verbose_name='DART 고유번호',
+        help_text='국내(KR) 종목의 DART corp_code 캐시. corpCode.xml 매핑 결과(ARCH-0002)'
+    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='생성일시')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='수정일시')
 
@@ -1354,3 +1361,90 @@ class CongressTrade(models.Model):
 
     def __str__(self):
         return f"{self.member.name} {self.get_transaction_type_display()} {self.raw_ticker} ({self.transaction_date})"
+
+
+class KrReportCode(models.TextChoices):
+    """DART 정기보고서 구분 코드 (reprt_code)"""
+    Q1 = '11013', '1분기보고서'
+    HALF = '11012', '반기보고서'
+    Q3 = '11014', '3분기보고서'
+    ANNUAL = '11011', '사업보고서'
+
+
+class KrDisclosure(models.Model):
+    """국내(KR) 종목 DART 공시 1건 (PRD-0004, ADR-0003 — CongressTrade와 완전히 별개 모델)"""
+    symbol = models.ForeignKey(
+        Symbol,
+        on_delete=models.CASCADE,
+        related_name='kr_disclosures',
+        verbose_name='종목'
+    )
+    corp_code = models.CharField(max_length=8, verbose_name='DART 고유번호')
+    corp_name = models.CharField(max_length=200, verbose_name='회사명')
+    rcept_no = models.CharField(max_length=20, unique=True, verbose_name='접수번호')
+    report_name = models.CharField(max_length=300, verbose_name='보고서명')
+    rcept_dt = models.DateField(
+        verbose_name='접수일자',
+        help_text='DART 공시검색 API는 접수 "시각"을 제공하지 않아 일자만 저장한다 (ADR-0003)'
+    )
+    source_url = models.URLField(max_length=500, verbose_name='원문 링크')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='생성일시')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='수정일시')
+
+    class Meta:
+        verbose_name = '국내 종목 공시'
+        verbose_name_plural = '국내 종목 공시들'
+        ordering = ['-rcept_dt', '-rcept_no']
+        indexes = [
+            models.Index(fields=['symbol', '-rcept_dt']),
+        ]
+
+    def __str__(self):
+        return f"{self.corp_name} - {self.report_name} ({self.rcept_dt})"
+
+
+class KrFinancialFact(models.Model):
+    """국내(KR) 종목 분기 실적 스냅샷 — DART 재무제표 API 기반 (PRD-0004, ADR-0003)"""
+    symbol = models.ForeignKey(
+        Symbol,
+        on_delete=models.CASCADE,
+        related_name='kr_financial_facts',
+        verbose_name='종목'
+    )
+    bsns_year = models.CharField(max_length=4, verbose_name='사업연도')
+    reprt_code = models.CharField(
+        max_length=5,
+        choices=KrReportCode.choices,
+        verbose_name='보고서 구분'
+    )
+    fs_div = models.CharField(
+        max_length=3,
+        default='CFS',
+        verbose_name='재무제표 구분',
+        help_text='CFS=연결재무제표, OFS=별도재무제표(연결 미제출 시 fallback)'
+    )
+    revenue = models.DecimalField(
+        max_digits=20, decimal_places=0, null=True, blank=True, verbose_name='매출액'
+    )
+    operating_profit = models.DecimalField(
+        max_digits=20, decimal_places=0, null=True, blank=True, verbose_name='영업이익'
+    )
+    net_profit = models.DecimalField(
+        max_digits=20, decimal_places=0, null=True, blank=True, verbose_name='당기순이익'
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='생성일시')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='수정일시')
+
+    class Meta:
+        verbose_name = '국내 종목 분기 실적'
+        verbose_name_plural = '국내 종목 분기 실적들'
+        ordering = ['-bsns_year', '-reprt_code']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['symbol', 'bsns_year', 'reprt_code'],
+                name='unique_kr_financial_fact',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.symbol.ticker} {self.bsns_year} {self.get_reprt_code_display()}"

@@ -5,7 +5,8 @@ from .views import (
     OrderViewSet, AccountViewSet, SymbolViewSet, DailyRealizedProfitViewSet,
     BrokerViewSet, HoldingViewSet, TargetAllocationPlanViewSet, ExchangeFeeRebateViewSet,
     StrategyViewSet, StrategyLinkViewSet, AlertEventViewSet, AlertTradePlanViewSet, signup,
-    PortfolioViewSet, PortfolioLinkViewSet, CongressMemberViewSet,
+    PortfolioViewSet, PortfolioLinkViewSet, CongressMemberViewSet, health_check,
+    KrDisclosureViewSet, KrFinancialFactViewSet,
 )
 from .oauth2_views import google_oauth2_login, google_oauth2_callback
 from .webhooks import tradingview_webhook
@@ -26,8 +27,11 @@ router.register(r'alert-trade-plans', AlertTradePlanViewSet, basename='alert-tra
 router.register(r'portfolios', PortfolioViewSet, basename='portfolio')
 router.register(r'portfolio-links', PortfolioLinkViewSet, basename='portfolio-link')
 router.register(r'congress-members', CongressMemberViewSet, basename='congress-member')
+router.register(r'kr-disclosures', KrDisclosureViewSet, basename='kr-disclosure')
+router.register(r'kr-financial-facts', KrFinancialFactViewSet, basename='kr-financial-fact')
 
 urlpatterns = [
+    path('api/health/', health_check, name='health-check'),
     path('api/users/', signup, name='signup'),
     path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
