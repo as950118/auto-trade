@@ -1,0 +1,47 @@
+name: Manual DB Ops (migration diagnose/fix)
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "diagnose (read-only SELECTs) or fix (marks trading.0024_kr_disclosure_earnings as applied, no DDL, then finishes deploy)"
+        required: true
+        type: choice
+        options:
+          - diagnose
+          - fix
+        default: diagnose
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Diagnose (read-only)
+        if: ${{ inputs.action == 'diagnose' }}
+        run: |
+          scp -i ~/.ssh/deploy_key ops/diagnose.sql "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/tmp/diagnose.sql"
+          ssh -i ~/.ssh/deploy_key "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" "cd /opt/auto-trade && sudo -u www-data env HOME=/opt/auto-trade .venv/bin/python manage.py dbshell < /tmp/diagnose.sql; rm -f /tmp/diagnose.sql"
+          echo "=== showmigrations trading (tail) ==="
+          ssh -i ~/.ssh/deploy_key "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" "cd /opt/auto-trade && sudo -u www-data env HOME=/opt/auto-trade .venv/bin/python manage.py showmigrations trading | tail -15"
+
+      - name: Fix (fake-apply 0024, then finish deploy)
+        if: ${{ inputs.action == 'fix' }}
+        run: |
+          ssh -i ~/.ssh/deploy_key "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" "cd /opt/auto-trade && sudo -u www-data env HOME=/opt/auto-trade .venv/bin/python manage.py migrate trading 0024_kr_disclosure_earnings --fake --noinput"
+          ssh -i ~/.ssh/deploy_key "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" "cd /opt/auto-trade && sudo -u www-data env HOME=/opt/auto-trade .venv/bin/python manage.py migrate --noinput"
+          ssh -i ~/.ssh/deploy_key "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" "cd /opt/auto-trade && sudo -u www-data env HOME=/opt/auto-trade .venv/bin/python manage.py collectstatic --noinput"
+          ssh -i ~/.ssh/deploy_key "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" "systemctl restart autotrade && sleep 3 && systemctl --no-pager --full status autotrade"
+          ssh -i ~/.ssh/deploy_key "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" "curl -fsS http://127.0.0.1:8000/api/health/"
+
+      - name: Clean up SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
