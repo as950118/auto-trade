@@ -1,0 +1,68 @@
+name: Daily Health Report
+
+# ai-office-simulator의 "오늘의 실제 리포트 불러오기" 버튼이 읽는
+# reports/latest.json을 매일 생성한다. 이 워크플로우는 코드를 수정/머지하지
+# 않고, 점검 결과만 리포트로 남긴다 (auto_merged는 항상 빈 배열).
+on:
+  schedule:
+    - cron: '0 0 * * *' # 매일 UTC 00:00 (KST 09:00)
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: daily-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout auto-trade
+        uses: actions/checkout@v4
+
+      - name: Checkout auto-trade-view
+        uses: actions/checkout@v4
+        with:
+          repository: as950118/auto-trade-view
+          path: auto-trade-view
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install backend dependencies
+        run: pip install -r requirements.txt
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install frontend dependencies
+        working-directory: auto-trade-view
+        run: npm ci
+
+      - name: Generate daily report
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTIONS: 'true'
+        run: |
+          python scripts/generate_daily_report.py \
+            --frontend-dir auto-trade-view \
+            --output reports/latest.json
+
+      - name: Commit report
+        run: |
+          git config user.name "autotrade-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add reports/
+          if git diff --cached --quiet; then
+            echo "리포트 변경 없음"
+          else
+            git commit -m "chore: 일일 자동 점검 리포트 갱신 ($(date -u +%Y-%m-%d))"
+            git push
+          fi
