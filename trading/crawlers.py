@@ -254,10 +254,7 @@ class StockCrawler:
                     currency=currency,
                     is_crypto=False,
                     is_delisted=False,
-                )
-
-            current_tickers = set(symbols_by_ticker.keys())
-            symbols = list(symbols_by_ticker.values())
+                ))
 
             # 종목 수가 많을 수 있어 건별 update_or_create 대신 일괄 upsert로 처리
             # (네트워크 왕복이 많으면 원격 DB 커넥션이 중간에 끊길 수 있음)
