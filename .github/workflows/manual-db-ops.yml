@@ -28,8 +28,8 @@ jobs:
       - name: Diagnose (read-only)
         if: ${{ inputs.action == 'diagnose' }}
         run: |
-          scp -i ~/.ssh/deploy_key ops/diagnose.sql "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/tmp/diagnose.sql"
-          ssh -i ~/.ssh/deploy_key "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" "cd /opt/auto-trade && sudo -u www-data env HOME=/opt/auto-trade .venv/bin/python manage.py dbshell < /tmp/diagnose.sql; rm -f /tmp/diagnose.sql"
+          scp -i ~/.ssh/deploy_key ops/diagnose.py "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/tmp/diagnose.py"
+          ssh -i ~/.ssh/deploy_key "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" "sudo cp /tmp/diagnose.py /opt/auto-trade/_ops_diagnose.py && sudo chown www-data:www-data /opt/auto-trade/_ops_diagnose.py && cd /opt/auto-trade && sudo -u www-data env HOME=/opt/auto-trade .venv/bin/python _ops_diagnose.py; sudo rm -f /opt/auto-trade/_ops_diagnose.py /tmp/diagnose.py"
           echo "=== showmigrations trading (tail) ==="
           ssh -i ~/.ssh/deploy_key "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" "cd /opt/auto-trade && sudo -u www-data env HOME=/opt/auto-trade .venv/bin/python manage.py showmigrations trading | tail -15"
 
