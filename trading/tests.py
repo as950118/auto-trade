@@ -53,9 +53,9 @@ class SchedulerJobTestCase(TestCase):
             account_password='test-password',
             api_key='test-api-key',
             api_secret='test-api-secret',
-            cash_balance=Decimal('1000000'),
-            stock_value=Decimal('500000'),
-            total_assets=Decimal('1500000')
+            cash_balance_krw=Decimal('1000000'),
+            stock_value_krw=Decimal('500000'),
+            total_assets_krw=Decimal('1500000')
         )
         
         # 종목 생성
@@ -67,7 +67,7 @@ class SchedulerJobTestCase(TestCase):
             is_crypto=True
         )
     
-    @patch('trading.scheduler.notify_scheduler')
+    @patch('trading.notifications.notify_scheduler')
     @patch('trading.tasks.process_orders')
     def test_process_orders_job_success(self, mock_process_orders, mock_notify):
         """주문 처리 작업 성공 테스트"""
@@ -95,7 +95,7 @@ class SchedulerJobTestCase(TestCase):
         call_args = mock_notify.call_args
         self.assertIn('주문 처리 완료', call_args[0][0])
     
-    @patch('trading.scheduler.notify_scheduler')
+    @patch('trading.notifications.notify_scheduler')
     @patch('trading.tasks.process_orders')
     def test_process_orders_job_no_orders(self, mock_process_orders, mock_notify):
         """주문이 없을 때 작업 테스트"""
@@ -107,7 +107,7 @@ class SchedulerJobTestCase(TestCase):
         # 주문이 없으면 알림이 전송되지 않음
         mock_notify.assert_not_called()
     
-    @patch('trading.scheduler.notify_scheduler')
+    @patch('trading.notifications.notify_scheduler')
     @patch('trading.tasks.process_orders')
     def test_process_orders_job_exception(self, mock_process_orders, mock_notify):
         """주문 처리 작업 예외 처리 테스트"""
@@ -119,7 +119,7 @@ class SchedulerJobTestCase(TestCase):
         call_args = mock_notify.call_args
         self.assertIn('주문 처리 실패', call_args[0][0])
     
-    @patch('trading.scheduler.notify_scheduler')
+    @patch('trading.notifications.notify_scheduler')
     @patch('trading.crawlers.crawl_all_symbols')
     def test_crawl_symbols_job_success(self, mock_crawl, mock_notify):
         """종목 크롤링 작업 성공 테스트"""
@@ -132,7 +132,7 @@ class SchedulerJobTestCase(TestCase):
         call_args = mock_notify.call_args
         self.assertIn('종목 크롤링 완료', call_args[0][0])
     
-    @patch('trading.scheduler.notify_scheduler')
+    @patch('trading.notifications.notify_scheduler')
     @patch('trading.crawlers.crawl_all_symbols')
     def test_crawl_symbols_job_exception(self, mock_crawl, mock_notify):
         """종목 크롤링 작업 예외 처리 테스트"""
@@ -144,7 +144,7 @@ class SchedulerJobTestCase(TestCase):
         call_args = mock_notify.call_args
         self.assertIn('종목 크롤링 실패', call_args[0][0])
     
-    @patch('trading.scheduler.notify_scheduler')
+    @patch('trading.notifications.notify_scheduler')
     @patch('trading.tasks.update_accounts_info')
     def test_update_accounts_info_job_success(self, mock_update, mock_notify):
         """계좌 정보 업데이트 작업 성공 테스트"""
@@ -156,7 +156,7 @@ class SchedulerJobTestCase(TestCase):
         # 모든 계좌가 업데이트되면 알림이 전송되지 않음
         mock_notify.assert_not_called()
     
-    @patch('trading.scheduler.notify_scheduler')
+    @patch('trading.notifications.notify_scheduler')
     @patch('trading.tasks.update_accounts_info')
     def test_update_accounts_info_job_partial_failure(self, mock_update, mock_notify):
         """계좌 정보 업데이트 부분 실패 테스트"""
@@ -171,7 +171,7 @@ class SchedulerJobTestCase(TestCase):
         call_args = mock_notify.call_args
         self.assertIn('계좌 정보 업데이트 완료', call_args[0][0])
     
-    @patch('trading.scheduler.notify_scheduler')
+    @patch('trading.notifications.notify_scheduler')
     @patch('trading.tasks.update_accounts_info')
     def test_update_accounts_info_job_exception(self, mock_update, mock_notify):
         """계좌 정보 업데이트 작업 예외 처리 테스트"""
@@ -183,7 +183,7 @@ class SchedulerJobTestCase(TestCase):
         call_args = mock_notify.call_args
         self.assertIn('계좌 정보 업데이트 실패', call_args[0][0])
     
-    @patch('trading.scheduler.notify_scheduler')
+    @patch('trading.notifications.notify_scheduler')
     @patch('trading.profit_calculator.ProfitCalculator.update_all_accounts_daily_profit')
     def test_calculate_daily_profit_job_success(self, mock_calculate, mock_notify):
         """일일 실현 손익 계산 작업 성공 테스트"""
@@ -196,7 +196,7 @@ class SchedulerJobTestCase(TestCase):
         call_args = mock_notify.call_args
         self.assertIn('일일 실현 손익 계산 완료', call_args[0][0])
     
-    @patch('trading.scheduler.notify_scheduler')
+    @patch('trading.notifications.notify_scheduler')
     @patch('trading.profit_calculator.ProfitCalculator.update_all_accounts_daily_profit')
     def test_calculate_daily_profit_job_exception(self, mock_calculate, mock_notify):
         """일일 실현 손익 계산 작업 예외 처리 테스트"""
@@ -251,9 +251,24 @@ class TasksTestCase(TestCase):
         mock_client = MagicMock()
         mock_client.get_account_info.return_value = {
             'success': True,
-            'cash_balance': Decimal('2000000'),
-            'stock_value': Decimal('1000000'),
-            'total_assets': Decimal('3000000'),
+            'cash_balance_krw': Decimal('2000000'),
+            'stock_value_krw': Decimal('1000000'),
+            'total_assets_krw': Decimal('3000000'),
+            'cash_balance_usd': Decimal('0'),
+            'stock_value_usd': Decimal('0'),
+            'total_assets_usd': Decimal('0'),
+            # update_account_info는 stock_value/total_assets를 이 값 그대로 쓰지 않고
+            # holdings를 실제로 동기화한 뒤 그 합계로 재계산한다(_recalculate_account_assets) —
+            # 재계산 결과가 위 stock_value_krw/total_assets_krw와 일치하도록 보유 종목을 함께 준다.
+            'holdings': [{
+                'ticker': self.symbol.ticker,
+                'name': self.symbol.name,
+                'quantity': Decimal('1'),
+                'current_price': Decimal('1000000'),
+                'average_price': Decimal('1000000'),
+                'total_value': Decimal('1000000'),
+                'currency': 'KRW',
+            }],
             'data': {}
         }
         mock_get_client.return_value = mock_client
@@ -266,7 +281,10 @@ class TasksTestCase(TestCase):
         self.assertEqual(self.account.cash_balance, Decimal('2000000'))
         self.assertEqual(self.account.stock_value, Decimal('1000000'))
         self.assertEqual(self.account.total_assets, Decimal('3000000'))
-        mock_get_client.assert_called_once_with(self.account)
+        # get_broker_client는 계좌 정보 조회(update_account_info)와 암호화폐 현재가 조회
+        # (update_holdings, 보유 종목 처리 시 매번)에서 각각 호출되어 총 2회 호출된다.
+        mock_get_client.assert_called_with(self.account)
+        self.assertEqual(mock_get_client.call_count, 2)
         mock_client.get_account_info.assert_called_once()
     
     @patch('trading.tasks.get_broker_client')
