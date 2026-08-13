@@ -10,6 +10,7 @@ on:
         options:
           - diagnose
           - fix
+          - logs
         default: diagnose
 
 jobs:
@@ -41,6 +42,13 @@ jobs:
           ssh -i ~/.ssh/deploy_key "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" "cd /opt/auto-trade && sudo -u www-data env HOME=/opt/auto-trade .venv/bin/python manage.py collectstatic --noinput"
           ssh -i ~/.ssh/deploy_key "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" "sudo systemctl restart autotrade && sleep 3 && sudo systemctl --no-pager --full status autotrade"
           ssh -i ~/.ssh/deploy_key "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" "curl -fsS http://127.0.0.1:8000/api/health/"
+
+      - name: Logs (read-only)
+        if: ${{ inputs.action == 'logs' }}
+        run: |
+          ssh -i ~/.ssh/deploy_key "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" "curl -sS -i http://127.0.0.1:8000/api/health/ | head -30"
+          echo "=== journalctl -u autotrade -n 60 ==="
+          ssh -i ~/.ssh/deploy_key "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" "sudo journalctl -u autotrade -n 60 --no-pager"
 
       - name: Clean up SSH key
         if: always()
