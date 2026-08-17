@@ -49,4 +49,27 @@ sudo -u "$APP_USER" env HOME="$APP_DIR" bash -c "cd '$APP_DIR' && .venv/bin/pyth
 echo "==> restart"
 systemctl restart "$SERVICE_NAME"
 systemctl --no-pager --full status "$SERVICE_NAME" || true
+
+echo "==> health check"
+HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8000/api/health/}"
+HEALTH_RETRIES="${HEALTH_RETRIES:-10}"
+HEALTH_INTERVAL_SEC="${HEALTH_INTERVAL_SEC:-3}"
+
+healthy=0
+for i in $(seq 1 "$HEALTH_RETRIES"); do
+  if curl -fsS "$HEALTH_URL" >/tmp/autotrade-health-check.json 2>/dev/null; then
+    healthy=1
+    break
+  fi
+  echo "  attempt $i/$HEALTH_RETRIES failed, retrying in ${HEALTH_INTERVAL_SEC}s..."
+  sleep "$HEALTH_INTERVAL_SEC"
+done
+
+if [[ "$healthy" -ne 1 ]]; then
+  echo "!! health check failed after $HEALTH_RETRIES attempts ($HEALTH_URL)"
+  echo "!! deployment likely broken, check: journalctl -u $SERVICE_NAME -n 100 --no-pager"
+  exit 1
+fi
+
+echo "  health check ok: $(cat /tmp/autotrade-health-check.json)"
 echo "done."
