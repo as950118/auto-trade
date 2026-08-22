@@ -96,34 +96,69 @@ def size_alert_trade(
     side: str,
     reference_price: Optional[Decimal] = None,
 ) -> SizingResult:
-    """시드% 기준으로 매수/매도 notional·quantity를 산정하고 비중 가드를 적용한다."""
+    """시드% 기준으로 매수/매도 notional·quantity를 산정하고 비중 가드를 적용한다.
+
+    실계좌(Account/Holding) 조회 담당. 순수 계산은 `size_trade()`에 위임한다
+    (백테스트 등 DB 없이 재사용하려면 `size_trade()`를 직접 호출).
+    """
     if isinstance(config, StrategyLink):
         config = config_from_link(config)
-
-    if config.seed_amount <= 0:
-        raise AlertSizingError('INVALID_SEED', '시드 금액이 올바르지 않습니다.')
 
     holding = get_holding(account, symbol)
     price = resolve_reference_price(holding, reference_price)
     position_value = position_value_of(holding, price)
+    cash_balance = _get_cash_balance(account, config.seed_currency or symbol.currency)
+    holding_quantity = holding.quantity if holding else ZERO
+
+    return size_trade(
+        config,
+        side,
+        reference_price=price,
+        position_value=position_value,
+        holding_quantity=holding_quantity,
+        cash_balance=cash_balance,
+        investment_limit=account.investment_limit,
+    )
+
+
+def size_trade(
+    config: EffectiveTradeConfig,
+    side: str,
+    *,
+    reference_price: Decimal,
+    position_value: Decimal,
+    holding_quantity: Decimal,
+    cash_balance: Decimal,
+    investment_limit: Optional[Decimal] = None,
+) -> SizingResult:
+    """계좌/보유 ORM 없이 Decimal 값만으로 사이징을 계산하는 순수 함수.
+
+    라이브 호출은 `size_alert_trade()`(Account/Holding에서 값을 뽑아 이 함수로 위임)를
+    쓰고, 백테스트처럼 시뮬레이션된 값으로 재계산하고 싶을 때는 이 함수를 직접 쓴다.
+    """
+    if config.seed_amount <= 0:
+        raise AlertSizingError('INVALID_SEED', '시드 금액이 올바르지 않습니다.')
+
     current_weight = (position_value / config.seed_amount * 100).quantize(
         Decimal('0.0001'), rounding=ROUND_DOWN
     )
 
     if side == OrderSide.BUY:
-        return _size_buy(config, account, symbol, price, position_value, current_weight)
+        return _size_buy(
+            config, reference_price, position_value, current_weight, cash_balance, investment_limit
+        )
     if side == OrderSide.SELL:
-        return _size_sell(config, holding, price, position_value, current_weight)
+        return _size_sell(config, reference_price, position_value, current_weight, holding_quantity)
     raise AlertSizingError('INVALID_ACTION', f'지원하지 않는 액션: {side}')
 
 
 def _size_buy(
     config: EffectiveTradeConfig,
-    account: Account,
-    symbol: Symbol,
     price: Decimal,
     position_value: Decimal,
     current_weight: Decimal,
+    cash_balance: Decimal,
+    investment_limit: Optional[Decimal],
 ) -> SizingResult:
     buy_notional = (
         config.seed_amount * config.trade_percent / Decimal('100')
@@ -140,14 +175,13 @@ def _size_buy(
     if buy_notional > remaining_capacity:
         buy_notional = remaining_capacity
 
-    cash = _get_cash_balance(account, config.seed_currency or symbol.currency)
-    if cash <= 0:
+    if cash_balance <= 0:
         raise AlertSizingError('INSUFFICIENT_CASH', '매수 가능한 예수금이 없습니다.')
-    if buy_notional > cash:
-        buy_notional = cash.quantize(MONEY_QUANT, rounding=ROUND_DOWN)
+    if buy_notional > cash_balance:
+        buy_notional = cash_balance.quantize(MONEY_QUANT, rounding=ROUND_DOWN)
 
-    if account.investment_limit is not None and buy_notional > account.investment_limit:
-        buy_notional = Decimal(str(account.investment_limit)).quantize(
+    if investment_limit is not None and buy_notional > investment_limit:
+        buy_notional = Decimal(str(investment_limit)).quantize(
             MONEY_QUANT, rounding=ROUND_DOWN
         )
 
@@ -170,12 +204,12 @@ def _size_buy(
 
 def _size_sell(
     config: EffectiveTradeConfig,
-    holding: Optional[Holding],
     price: Decimal,
     position_value: Decimal,
     current_weight: Decimal,
+    holding_quantity: Decimal,
 ) -> SizingResult:
-    if not holding or holding.quantity <= 0:
+    if not holding_quantity or holding_quantity <= 0:
         raise AlertSizingError('NO_HOLDING', '해당 종목을 보유하고 있지 않습니다.')
 
     if config.min_sell_holding_percent is not None:
@@ -194,7 +228,7 @@ def _size_sell(
     ).quantize(MONEY_QUANT, rounding=ROUND_DOWN)
 
     sell_qty = (sell_notional / price).quantize(QTY_QUANT, rounding=ROUND_DOWN)
-    sell_qty = min(sell_qty, holding.quantity)
+    sell_qty = min(sell_qty, holding_quantity)
 
     if sell_qty <= 0:
         raise AlertSizingError('NOTHING_TO_SELL', '매도 가능한 수량이 없습니다.')
