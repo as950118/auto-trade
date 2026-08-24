@@ -7,8 +7,8 @@
 
 set -euo pipefail
 
-APP_DIR="${APP_DIR:-/opt/auto-trade}"
-APP_USER="${APP_USER:-www-data}"
+export APP_DIR="${APP_DIR:-/opt/auto-trade}"
+export APP_USER="${APP_USER:-www-data}"
 SERVICE_NAME="autotrade"
 
 if [[ "$(id -u)" -ne 0 ]]; then
@@ -36,6 +36,15 @@ if [[ -d .git ]]; then
   # 없다. git이 전역 설정을 읽거나 쓰려고 할 때 이 경로를 건드리다 실패하지
   # 않도록, 이미 www-data 소유로 chown해둔 APP_DIR을 HOME으로 지정한다.
   sudo -u "$APP_USER" env HOME="$APP_DIR" git pull --ff-only
+
+  # git pull이 이 스크립트 자신(deploy/update.sh)도 갱신할 수 있는데, bash는
+  # 실행 중인 스크립트를 다시 읽지 않아 pull 이전에 이미 읽어들인 옛 버전을
+  # 계속 실행해버린다(2026-08-17 배포에서 헬스체크 블록 전체가 실행되지 않고
+  # 조용히 통과된 원인 — run 31995928782 로그로 실측 확인). pull 직후 방금
+  # 받은 파일을 다시 exec해서 항상 디스크의 최신 버전이 실행되도록 한다.
+  if [[ "${AUTOTRADE_UPDATE_REEXECED:-0}" != "1" ]]; then
+    exec env AUTOTRADE_UPDATE_REEXECED=1 bash "$APP_DIR/deploy/update.sh"
+  fi
 fi
 
 echo "==> pip install"
@@ -52,7 +61,11 @@ systemctl --no-pager --full status "$SERVICE_NAME" || true
 
 echo "==> health check"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8000/api/health/}"
-HEALTH_RETRIES="${HEALTH_RETRIES:-10}"
+# run 32561941315(2026-08-22) 실측: 재시작 후 10회x3초(30초) 안에도 응답이 없었고
+# 약 1분 뒤 수동 curl은 정상이었다 — gunicorn worker 1개가 pandas/financedatareader
+# 등 무거운 의존성을 콜드 임포트하는 시간 때문으로 보인다. 그 관측치에 2배 여유를
+# 둔 40회x3초(120초)로 확대한다.
+HEALTH_RETRIES="${HEALTH_RETRIES:-40}"
 HEALTH_INTERVAL_SEC="${HEALTH_INTERVAL_SEC:-3}"
 
 healthy=0
