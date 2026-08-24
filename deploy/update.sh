@@ -61,11 +61,12 @@ systemctl --no-pager --full status "$SERVICE_NAME" || true
 
 echo "==> health check"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8000/api/health/}"
-# run 32561941315(2026-08-22) 실측: 재시작 후 10회x3초(30초) 안에도 응답이 없었고
-# 약 1분 뒤 수동 curl은 정상이었다 — gunicorn worker 1개가 pandas/financedatareader
-# 등 무거운 의존성을 콜드 임포트하는 시간 때문으로 보인다. 그 관측치에 2배 여유를
-# 둔 40회x3초(120초)로 확대한다.
-HEALTH_RETRIES="${HEALTH_RETRIES:-40}"
+# run 32739490102(2026-08-24)로 실측 재확인: self-exec가 처음 실제 적용된 배포에서
+# 40회x3초(120초)로도 부족했다(전부 실패, 이후 curl로 확인한 실제 정상화는 120~180초
+# 사이). 직전 배포가 92초 전에 있었던 영향(연속 재시작 시 콜드스타트가 더 걸릴 수
+# 있음)까지 감안해 80회x3초(240초)로 다시 확대. self-exec가 이제 적용 중이라 이 값도
+# 이 배포 자신에 바로 반영된다.
+HEALTH_RETRIES="${HEALTH_RETRIES:-80}"
 HEALTH_INTERVAL_SEC="${HEALTH_INTERVAL_SEC:-3}"
 
 healthy=0
