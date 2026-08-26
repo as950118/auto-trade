@@ -6,7 +6,7 @@ from .views import (
     BrokerViewSet, HoldingViewSet, TargetAllocationPlanViewSet, ExchangeFeeRebateViewSet,
     StrategyViewSet, StrategyLinkViewSet, AlertEventViewSet, AlertTradePlanViewSet, signup,
     PortfolioViewSet, PortfolioLinkViewSet, CongressMemberViewSet, health_check,
-    KrDisclosureViewSet, KrFinancialFactViewSet,
+    KrDisclosureViewSet, KrFinancialFactViewSet, me, set_password,
 )
 from .oauth2_views import google_oauth2_login, google_oauth2_callback
 from .webhooks import tradingview_webhook
@@ -33,6 +33,8 @@ router.register(r'kr-financial-facts', KrFinancialFactViewSet, basename='kr-fina
 urlpatterns = [
     path('api/health/', health_check, name='health-check'),
     path('api/users/', signup, name='signup'),
+    path('api/users/me/', me, name='me'),
+    path('api/users/me/password/', set_password, name='set-password'),
     path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     path('api/oauth2/google/login/', google_oauth2_login),
