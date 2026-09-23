@@ -11,10 +11,11 @@ tasks.run_target_allocation_plans()의 target_value/deficit 계산 패턴을
 from __future__ import annotations
 
 import logging
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal
 from typing import Iterable, Optional
 
 from .. import alert_sizing
+from ..calculations import rebalance_quantity, target_value_for_weight
 from ..models import (
     Holding,
     Order,
@@ -65,9 +66,9 @@ def rebalance_link(link: PortfolioLink) -> int:
             )
             continue
         try:
-            target_value = (
-                link.seed_amount * holding.target_weight_percent / Decimal('100')
-            ).quantize(MONEY_QUANT, rounding=ROUND_DOWN)
+            target_value = target_value_for_weight(
+                link.seed_amount, holding.target_weight_percent, MONEY_QUANT
+            )
 
             current_holding = Holding.objects.filter(account=account, symbol=symbol).first()
             current_value = current_holding.total_value if current_holding else ZERO
@@ -89,17 +90,14 @@ def rebalance_link(link: PortfolioLink) -> int:
                 if not account.buy_enabled:
                     logger.info('portfolio rebalance: buy disabled for account=%s, skip', account.id)
                     continue
-                quantity = (deficit / price).quantize(QTY_QUANT, rounding=ROUND_DOWN)
             else:
                 side = 'SELL'
                 if not account.sell_enabled:
                     logger.info('portfolio rebalance: sell disabled for account=%s, skip', account.id)
                     continue
-                if not current_holding or current_holding.quantity <= 0:
-                    continue
-                quantity = (abs(deficit) / price).quantize(QTY_QUANT, rounding=ROUND_DOWN)
-                quantity = min(quantity, current_holding.quantity)
 
+            held_quantity = current_holding.quantity if current_holding else ZERO
+            quantity = rebalance_quantity(deficit, price, held_quantity, QTY_QUANT)
             if quantity <= 0:
                 continue
 
