@@ -271,8 +271,8 @@ def check_order_status(order: Order, client=None):
                         order.average_filled_price = Decimal(str(avg_price)) if avg_price > 0 else None
                         order.filled_at = timezone.now()
                         
-                        # 매도 주문이고 새로 체결된 경우 실현 손익 계산
-                        if not was_filled and order.side == 'SELL':
+                        # 새로 체결된 경우 일일 실현 손익 갱신 (매수도 total_buy_amount에 반영되므로 포함, TASK-0016)
+                        if not was_filled:
                             from .profit_calculator import ProfitCalculator
                             try:
                                 ProfitCalculator.update_daily_realized_profit(
