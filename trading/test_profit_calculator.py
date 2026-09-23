@@ -5,9 +5,11 @@ ProfitCalculatorTestCase는 순수 계산 함수(calculations.py)로 추출하�
 추출 전 코드에서 먼저 실행해 통과를 확인했고, 추출 후에도 같은 결과가 나와야 한다.
 """
 from datetime import date, datetime
+from io import StringIO
 from decimal import Decimal
 
 from django.contrib.auth.models import User
+from django.core.management import call_command
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
@@ -19,7 +21,7 @@ from .calculations import (
     rebalance_quantity,
     target_value_for_weight,
 )
-from .models import Account, Broker, Country, Currency, Order, OrderStatus, Symbol
+from .models import Account, Broker, Country, Currency, DailyRealizedProfit, Order, OrderStatus, Symbol
 from .profit_calculator import ProfitCalculator
 
 DAY = date(2026, 9, 1)
@@ -118,9 +120,8 @@ class ProfitCalculatorTestCase(TestCase):
         self.assertEqual(result['realized_profit'], Decimal('300'))
         self.assertEqual(result['total_sell_amount'], Decimal('600'))
         self.assertEqual(result['realized_profit_rate'], Decimal('50'))
-        # 현재 동작: total_buy_amount는 어디서도 누적되지 않아 항상 0이다. 버그로 추적 중이다
-        # (TASK-0016). 고칠 때는 이 단언을 새 정의에 맞게 바꾼다 — 이 테스트를 지우거나 되돌리지 말 것.
-        self.assertEqual(result['total_buy_amount'], Decimal('0'))
+        # TASK-0016: 그날 체결된 매수 주문 금액 합계 (100 + 200)
+        self.assertEqual(result['total_buy_amount'], Decimal('300'))
 
     def test_daily_realized_profit_rate_is_zero_without_sells(self):
         self._filled('BUY', '1', '100', 1)
@@ -129,6 +130,44 @@ class ProfitCalculatorTestCase(TestCase):
 
         self.assertEqual(result['realized_profit'], Decimal('0'))
         self.assertEqual(result['realized_profit_rate'], Decimal('0'))
+        self.assertEqual(result['total_buy_amount'], Decimal('100'))
+
+    def test_daily_total_buy_amount_only_counts_filled_buys_on_that_day(self):
+        self._filled('BUY', '1', '100', 1)
+        Order.objects.create(
+            account=self.account, symbol=self.btc, side='BUY', order_type='MARKET',
+            quantity=Decimal('1'), status=OrderStatus.PENDING,
+        )
+        Order.objects.create(
+            account=self.account, symbol=self.btc, side='BUY', order_type='MARKET',
+            quantity=Decimal('2'), status=OrderStatus.FILLED, filled_quantity=Decimal('2'),
+            average_filled_price=Decimal('500'),
+            filled_at=timezone.make_aware(datetime(2026, 9, 2, 1, 0)),
+        )
+
+        result = ProfitCalculator.calculate_daily_realized_profit(self.account, DAY)
+
+        self.assertEqual(result['total_buy_amount'], Decimal('100'))
+
+    def test_update_daily_realized_profit_persists_total_buy_amount(self):
+        self._filled('BUY', '2', '150', 1)
+
+        row = ProfitCalculator.update_daily_realized_profit(self.account, DAY)
+
+        row.refresh_from_db()
+        self.assertEqual(row.total_buy_amount, Decimal('300'))
+
+    def test_recalculate_command_backfills_total_buy_amount(self):
+        self._filled('BUY', '2', '150', 1)
+        DailyRealizedProfit.objects.create(account=self.account, date=DAY, total_buy_amount=Decimal('0'))
+
+        out = StringIO()
+        call_command('recalculate_daily_profit', '--start', '2026-09-01', '--end', '2026-09-01', '--dry-run', stdout=out)
+        self.assertEqual(DailyRealizedProfit.objects.get(account=self.account, date=DAY).total_buy_amount, Decimal('0'))
+        self.assertIn('1행 변경 예정', out.getvalue())
+
+        call_command('recalculate_daily_profit', '--start', '2026-09-01', '--end', '2026-09-01', stdout=StringIO())
+        self.assertEqual(DailyRealizedProfit.objects.get(account=self.account, date=DAY).total_buy_amount, Decimal('300'))
 
 
 class CalculationsTestCase(SimpleTestCase):

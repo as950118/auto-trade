@@ -128,7 +128,19 @@ class ProfitCalculator:
             if sell_order.filled_quantity and sell_order.average_filled_price:
                 sell_amount = Decimal(str(sell_order.filled_quantity)) * Decimal(str(sell_order.average_filled_price))
                 total_sell_amount += sell_amount
-        
+
+        # 해당 날짜에 체결된 매수 주문 금액 합계 (TASK-0016: 이전에는 누적하지 않아 항상 0이었다)
+        buy_orders = Order.objects.filter(
+            account=account,
+            side='BUY',
+            status=OrderStatus.FILLED,
+            filled_at__gte=start_datetime,
+            filled_at__lt=end_datetime
+        )
+        for buy_order in buy_orders:
+            if buy_order.filled_quantity and buy_order.average_filled_price:
+                total_buy_amount += Decimal(str(buy_order.filled_quantity)) * Decimal(str(buy_order.average_filled_price))
+
         realized_profit_rate = profit_rate_percent(total_realized_profit, total_sell_amount)
         
         return {
