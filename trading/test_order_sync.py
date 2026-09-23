@@ -155,6 +155,23 @@ class BingXClientTestCase(_BingXFixture):
         self.assertEqual(result['average_price'], Decimal('65000.0'))
         client.exchange.fetch_order.assert_called_once_with('ex-1', 'BTC/USDT')
 
+    def test_partially_filled_then_canceled_is_filled(self):
+        client = self._client()
+        client.exchange.fetch_order.return_value = {'id': 'ex-1', 'status': 'canceled', 'filled': 0.004, 'average': 1.0}
+
+        result = client.get_order_status(self._order())
+
+        self.assertEqual(result['status'], ORDER_STATUS_FILLED)
+        self.assertEqual(result['filled_quantity'], Decimal('0.004'))
+
+    def test_canceled_without_fill_is_canceled(self):
+        client = self._client()
+        client.exchange.fetch_order.return_value = {'id': 'ex-1', 'status': 'canceled', 'filled': 0, 'average': None}
+
+        result = client.get_order_status(self._order())
+
+        self.assertEqual(result['status'], ORDER_STATUS_CANCELED)
+
     def test_get_order_status_unknown_ccxt_status(self):
         client = self._client()
         client.exchange.fetch_order.return_value = {'id': 'ex-1', 'status': None, 'filled': None, 'average': None}

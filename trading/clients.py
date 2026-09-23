@@ -503,12 +503,16 @@ class BingXClient(BaseBrokerClient):
         try:
             self._ensure_markets()
             result = self.exchange.fetch_order(order.external_order_id, self.to_ccxt_symbol(order.symbol.ticker))
-            filled = result.get('filled')
+            filled = Decimal(str(result['filled'])) if result.get('filled') is not None else Decimal('0')
             average = result.get('average')
             last_trade_ms = result.get('lastTradeTimestamp')
+            status = self._CCXT_STATUS.get(result.get('status'), ORDER_STATUS_UNKNOWN)
+            if status == ORDER_STATUS_CANCELED and filled > 0:
+                # 부분 체결 후 취소/만료 — 체결된 수량은 실제 거래이므로 filled로 본다(Upbit와 같은 규칙)
+                status = ORDER_STATUS_FILLED
             return order_status_result(
-                self._CCXT_STATUS.get(result.get('status'), ORDER_STATUS_UNKNOWN),
-                filled_quantity=Decimal(str(filled)) if filled is not None else Decimal('0'),
+                status,
+                filled_quantity=filled,
                 average_price=Decimal(str(average)) if average else None,
                 external_order_id=result.get('id'),
                 filled_at=datetime.fromtimestamp(last_trade_ms / 1000, tz=dt_timezone.utc) if last_trade_ms else None,
