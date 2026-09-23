@@ -149,6 +149,25 @@ class ProfitCalculatorTestCase(TestCase):
 
         self.assertEqual(result['total_buy_amount'], Decimal('100'))
 
+    def test_daily_total_buy_amount_excludes_non_filled_and_next_midnight(self):
+        self._filled('BUY', '1', '100', 1)
+        partial = self._filled('BUY', '1', '999', 2)
+        partial.status = OrderStatus.PARTIALLY_FILLED
+        partial.save()
+        cancelled = self._filled('BUY', '1', '999', 3)
+        cancelled.status = OrderStatus.CANCELLED
+        cancelled.save()
+        Order.objects.create(
+            account=self.account, symbol=self.btc, side='BUY', order_type='MARKET',
+            quantity=Decimal('1'), status=OrderStatus.FILLED, filled_quantity=Decimal('1'),
+            average_filled_price=Decimal('999'),
+            filled_at=timezone.make_aware(datetime(2026, 9, 2, 0, 0)),
+        )
+
+        result = ProfitCalculator.calculate_daily_realized_profit(self.account, DAY)
+
+        self.assertEqual(result['total_buy_amount'], Decimal('100'))
+
     def test_update_daily_realized_profit_persists_total_buy_amount(self):
         self._filled('BUY', '2', '150', 1)
 
@@ -168,6 +187,44 @@ class ProfitCalculatorTestCase(TestCase):
 
         call_command('recalculate_daily_profit', '--start', '2026-09-01', '--end', '2026-09-01', stdout=StringIO())
         self.assertEqual(DailyRealizedProfit.objects.get(account=self.account, date=DAY).total_buy_amount, Decimal('300'))
+
+    def test_recalculate_command_default_only_writes_total_buy_amount_in_range(self):
+        self._filled('BUY', '1', '100', 1)
+        self._filled('SELL', '1', '150', 2)
+        in_range = DailyRealizedProfit.objects.create(account=self.account, date=DAY)
+        out_of_range = DailyRealizedProfit.objects.create(account=self.account, date=date(2026, 8, 31))
+        out_of_range_updated_at = out_of_range.updated_at
+
+        out = StringIO()
+        call_command('recalculate_daily_profit', '--start', '2026-09-01', '--end', '2026-09-01', stdout=out)
+
+        in_range.refresh_from_db()
+        out_of_range.refresh_from_db()
+        self.assertEqual(in_range.total_buy_amount, Decimal('100'))
+        self.assertEqual(in_range.realized_profit, Decimal('0'))  # 기본값에서는 미갱신
+        self.assertIn('realized_profit: 0.00 -> 50.00 (미갱신)', out.getvalue())
+        self.assertEqual(out_of_range.updated_at, out_of_range_updated_at)
+        self.assertEqual(DailyRealizedProfit.objects.count(), 2)
+
+        call_command('recalculate_daily_profit', '--start', '2026-09-01', '--end', '2026-09-01', '--all-fields',
+                     stdout=StringIO())
+        in_range.refresh_from_db()
+        self.assertEqual(in_range.realized_profit, Decimal('50'))
+
+    def test_recalculate_command_does_not_create_missing_rows(self):
+        self._filled('BUY', '1', '100', 1)
+
+        call_command('recalculate_daily_profit', '--start', '2026-09-01', '--end', '2026-09-01', stdout=StringIO())
+
+        self.assertFalse(DailyRealizedProfit.objects.exists())
+
+
+class RecalculateRoundingTestCase(SimpleTestCase):
+    def test_as_stored_rounds_half_up_like_postgres(self):
+        from .management.commands.recalculate_daily_profit import as_stored
+
+        self.assertEqual(as_stored(Decimal('0.125'), 2), Decimal('0.13'))
+        self.assertEqual(as_stored(Decimal('12.34565'), 4), Decimal('12.3457'))
 
 
 class CalculationsTestCase(SimpleTestCase):
