@@ -61,26 +61,41 @@ systemctl --no-pager --full status "$SERVICE_NAME" || true
 
 echo "==> health check"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8000/api/health/}"
-# 2026-08-24 실측(run 32739490102, 32739929344): 짧은 간격으로 연속 재시작하면
-# 콜드스타트가 계속 길어졌다(40회=120초 부족 → 80회=240초도 14초 차로 부족, 그러나
-# 두 경우 모두 스크립트가 포기한 직후 공개 도메인은 정상). 연속 재배포 자체가
-# 지연을 누적시키는 것으로 보여 100회x3초(300초)로 여유를 더 두되, 이 수치를
-# 정상적인(연속 재배포가 아닌) 단일 배포로 재검증하는 게 남은 과제다.
-HEALTH_RETRIES="${HEALTH_RETRIES:-100}"
+# 서버 .env의 ALLOWED_HOSTS는 공개 도메인만 담고 있어(setup.sh/ssl-duckdns.sh가 그렇게
+# 덮어씀), Host: 127.0.0.1:8000으로 보내면 Django가 DisallowedHost로 즉시 400을
+# 돌려준다(2026-08-13 run 31654522438 로그로 실측). 헬스체크가 "콜드스타트가 느려서"
+# 실패하는 것처럼 보였던 건 이 때문 — 재시도 창을 아무리 늘려도 통과할 수 없었다.
+# nginx가 하는 것과 같게 공개 도메인을 Host 헤더로 실어 보낸다.
+if [[ -z "${HEALTH_HOST:-}" && -f "$APP_DIR/.env" ]]; then
+  HEALTH_HOST="$(sed -n 's/^ALLOWED_HOSTS=//p' "$APP_DIR/.env" | tail -n 1 \
+    | tr -d "\"' " | tr ',' '\n' | grep -v '^\*$' | head -n 1 || true)"
+fi
+HEALTH_HOST="${HEALTH_HOST:-}"
+HEALTH_RETRIES="${HEALTH_RETRIES:-20}"
 HEALTH_INTERVAL_SEC="${HEALTH_INTERVAL_SEC:-3}"
+
+curl_args=(-sS -o /tmp/autotrade-health-check.json -w '%{http_code}')
+if [[ -n "$HEALTH_HOST" ]]; then
+  curl_args+=(-H "Host: $HEALTH_HOST")
+fi
+echo "  url=$HEALTH_URL host=${HEALTH_HOST:-(default)}"
 
 healthy=0
 for i in $(seq 1 "$HEALTH_RETRIES"); do
-  if curl -fsS "$HEALTH_URL" >/tmp/autotrade-health-check.json 2>/dev/null; then
+  code="$(curl "${curl_args[@]}" "$HEALTH_URL" 2>/dev/null || true)"
+  if [[ "$code" == "200" ]]; then
     healthy=1
     break
   fi
-  echo "  attempt $i/$HEALTH_RETRIES failed, retrying in ${HEALTH_INTERVAL_SEC}s..."
+  echo "  attempt $i/$HEALTH_RETRIES failed (http ${code:-none}), retrying in ${HEALTH_INTERVAL_SEC}s..."
   sleep "$HEALTH_INTERVAL_SEC"
 done
 
 if [[ "$healthy" -ne 1 ]]; then
-  echo "!! health check failed after $HEALTH_RETRIES attempts ($HEALTH_URL)"
+  echo "!! health check failed after $HEALTH_RETRIES attempts ($HEALTH_URL, last http ${code:-none})"
+  if [[ "${code:-}" == "400" ]]; then
+    echo "!! 400은 보통 Host 헤더가 ALLOWED_HOSTS에 없다는 뜻 (host=${HEALTH_HOST:-(default)})"
+  fi
   echo "!! deployment likely broken, check: journalctl -u $SERVICE_NAME -n 100 --no-pager"
   exit 1
 fi
