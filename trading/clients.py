@@ -3,11 +3,9 @@
 """
 import logging
 import requests
+import ccxt
 import pyupbit
-import hmac
-import hashlib
 import time
-import urllib.parse
 from decimal import Decimal, ROUND_DOWN
 from typing import Dict, Optional
 from datetime import timedelta
@@ -15,6 +13,32 @@ from django.utils import timezone
 from .models import Account, Order, Symbol
 
 logger = logging.getLogger(__name__)
+
+
+# 정규화된 주문 상태 (ADR-0004). get_order_status()는 브로커와 무관하게 이 값을 'status'로 돌려준다.
+ORDER_STATUS_OPEN = 'open'          # 미체결 또는 부분체결 (filled_quantity > 0이면 부분체결)
+ORDER_STATUS_FILLED = 'filled'
+ORDER_STATUS_CANCELED = 'canceled'
+ORDER_STATUS_REJECTED = 'rejected'
+ORDER_STATUS_UNKNOWN = 'unknown'    # 브로커 응답을 해석할 수 없음 — 호출부는 상태를 바꾸지 않는다
+
+
+def order_status_result(
+    status: str,
+    filled_quantity: Decimal = Decimal('0'),
+    average_price: Optional[Decimal] = None,
+    external_order_id: Optional[str] = None,
+    raw=None,
+) -> Dict:
+    """get_order_status()의 성공 응답. 'data'는 브로커 원본 응답(하위 호환·디버깅용)."""
+    return {
+        'success': True,
+        'status': status,
+        'filled_quantity': filled_quantity,
+        'average_price': average_price,
+        'external_order_id': external_order_id,
+        'data': raw,
+    }
 
 
 class BaseBrokerClient:
@@ -28,7 +52,11 @@ class BaseBrokerClient:
         raise NotImplementedError
     
     def get_order_status(self, order: Order) -> Dict:
-        """주문 상태 조회"""
+        """
+        주문 상태 조회. 성공 시 order_status_result() 형태를 반환한다:
+            {'success': True, 'status': ORDER_STATUS_*, 'filled_quantity': Decimal,
+             'average_price': Optional[Decimal], 'external_order_id': Optional[str], 'data': 원본}
+        """
         raise NotImplementedError
     
     def get_account_info(self) -> Dict:
@@ -261,312 +289,202 @@ class UpbitClient(BaseBrokerClient):
                     'error': result.get('error', {}).get('message', '조회 실패')
                 }
             
-            return {
-                'success': True,
-                'data': result
-            }
+            return self._normalize_order(result)
         except Exception as e:
             return {
                 'success': False,
                 'error': str(e)
             }
 
+    @staticmethod
+    def _normalize_order(data: Dict) -> Dict:
+        """
+        Upbit 주문 응답 → 정규화 상태. 기존 tasks.check_order_status()의 Upbit 해석을 그대로 옮겼다:
+        state 'done' → filled, 'cancel' → canceled, 그 외는 open(executed_volume > 0이면 부분체결).
+        """
+        state = data.get('state')
+        executed_volume = Decimal(str(float(data.get('executed_volume', 0))))
+        avg_price = float(data.get('avg_price', 0))
+        if state == 'done':
+            status = ORDER_STATUS_FILLED
+        elif state == 'cancel':
+            status = ORDER_STATUS_CANCELED
+        else:
+            status = ORDER_STATUS_OPEN
+        return order_status_result(
+            status,
+            filled_quantity=executed_volume,
+            average_price=Decimal(str(avg_price)) if avg_price > 0 else None,
+            external_order_id=data.get('uuid'),
+            raw=data,
+        )
+
 
 class BingXClient(BaseBrokerClient):
-    """BingX API 클라이언트"""
-    
-    BASE_URL = "https://open-api.bingx.com"
-    
+    """
+    BingX 현물 클라이언트 — ccxt 기반 (ADR-0004, TASK-0015).
+
+    이전에는 HMAC 서명·요청·응답 파싱을 직접 구현했으나, 거래소 API 변경 추적 부담을 ccxt(MIT)에 넘긴다.
+    ccxt 버전은 requirements.txt에서 고정한다(pyOpenSSL이 요구하는 cryptography 버전과 호환되는 4.5.64).
+    ccxt는 요청 헤더에 X-SOURCE-KEY(기본값 'CCXT', 브로커 식별용)를 붙인다.
+    """
+
+    QUOTE = 'USDT'
+    MARKETS_TTL_SEC = 6 * 60 * 60
+
+    # load_markets()는 spot/swap/inverse 마켓 목록을 모두 받아오는 무거운 호출이라 프로세스 단위로 캐시한다.
+    _markets = None
+    _markets_loaded_at = 0.0
+
     def __init__(self, account: Account):
         super().__init__(account)
         if not account.api_key or not account.api_secret:
             raise ValueError("BingX 계좌에는 API 키와 시크릿이 필요합니다.")
-        
-        self.api_key = account.api_key
-        self.api_secret = account.api_secret
-    
-    def _generate_signature(self, params: Dict) -> str:
-        """HMAC SHA256 서명 생성"""
-        # BingX API 서명 생성 방식
-        # 쿼리 문자열 생성 (키 정렬, 값은 URL 인코딩)
-        query_string = urllib.parse.urlencode(sorted(params.items()))
-        # HMAC SHA256 서명
-        signature = hmac.new(
-            self.api_secret.encode('utf-8'),
-            query_string.encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest()
-        return signature
-    
-    def _make_request(self, method: str, endpoint: str, params: Optional[Dict] = None, data: Optional[Dict] = None) -> Dict:
-        """BingX API 요청"""
-        url = f"{self.BASE_URL}{endpoint}"
-        
-        # 기본 파라미터 설정
-        if params is None:
-            params = {}
-        
-        # 타임스탬프 추가
-        timestamp = int(time.time() * 1000)
-        params['timestamp'] = timestamp
-        
-        # 헤더 설정
-        headers = {
-            'X-BX-APIKEY': self.api_key,
-            'Content-Type': 'application/json'
-        }
-        
-        try:
-            if method == 'GET':
-                # GET 요청: 쿼리 파라미터에 서명 포함
-                signature = self._generate_signature(params)
-                params['signature'] = signature
-                response = requests.get(url, params=params, headers=headers, timeout=10)
-            elif method == 'POST':
-                # POST 요청: body에 데이터를 넣고, 서명은 쿼리 파라미터에 포함
-                # BingX API는 POST 요청 시 body 데이터는 서명에 포함하지 않고, 
-                # 쿼리 파라미터(timestamp 등)만 서명에 포함하는 경우가 많음
-                signature = self._generate_signature(params)
-                params['signature'] = signature
-                response = requests.post(url, params=params, json=data, headers=headers, timeout=10)
-            else:
-                return {'success': False, 'error': f'지원하지 않는 HTTP 메서드: {method}'}
-            
-            # 응답 본문 로깅 (디버깅용)
-            response_text = response.text
-            logger.debug(f"BingX API 응답 ({endpoint}): {response.status_code} - {response_text[:500]}")
-            
-            try:
-                result = response.json()
-            except:
-                # JSON 파싱 실패 시 텍스트 반환
-                return {
-                    'success': False,
-                    'error': f'JSON 파싱 실패: {response_text[:200]}'
-                }
-            
-            if response.status_code == 200:
-                # BingX API는 code 필드로 성공/실패를 표시
-                if result.get('code') == 0:
-                    return {'success': True, 'data': result.get('data', result)}
-                else:
-                    error_msg = result.get('msg', result.get('message', f"API 오류: {result.get('code')}"))
-                    return {
-                        'success': False,
-                        'error': error_msg
-                    }
-            else:
-                # HTTP 에러 응답도 JSON일 수 있음
-                error_msg = result.get('msg', result.get('message', response_text[:200]))
-                return {
-                    'success': False,
-                    'error': f'HTTP {response.status_code}: {error_msg}'
-                }
-        except Exception as e:
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
+
+        self.exchange = ccxt.bingx({
+            'apiKey': account.api_key,
+            'secret': account.api_secret,
+            'enableRateLimit': True,
+            'timeout': 10000,
+            'options': {'defaultType': 'spot'},
+        })
+
+    def _ensure_markets(self):
+        cls = BingXClient
+        if cls._markets is None or time.time() - cls._markets_loaded_at > cls.MARKETS_TTL_SEC:
+            cls._markets = self.exchange.load_markets()
+            cls._markets_loaded_at = time.time()
+        elif not self.exchange.markets:
+            self.exchange.set_markets(cls._markets)
+
+    @classmethod
+    def to_ccxt_symbol(cls, ticker: str) -> str:
+        """'BTC-USDT' / 'BTC' → ccxt 통합 심볼 'BTC/USDT'."""
+        if '/' in ticker:
+            return ticker
+        if '-' in ticker:
+            base, quote = ticker.split('-', 1)
+            return f"{base}/{quote}"
+        return f"{ticker}/{cls.QUOTE}"
+
     def get_account_info(self) -> Dict:
         """BingX 계좌 정보 조회"""
         try:
-            # BingX 잔고 조회 API
-            # 테스트 결과: /openApi/spot/v1/account/balance 엔드포인트 사용
-            # 응답 구조: {"code": 0, "data": {"balances": [{"asset": "...", "free": "...", "locked": "..."}]}}
-            result = self._make_request('GET', '/openApi/spot/v1/account/balance')
-            
-            if not result.get('success'):
-                return result
-            
-            account_data = result.get('data', {})
-            balances = account_data.get('balances', [])
-            
-            if not balances:
-                logger.warning("BingX 계좌 잔고가 비어있습니다.")
-                balances = []
-            
+            balance = self.exchange.fetch_balance()
+            raw = (balance.get('info') or {}).get('data') or {}
+            display_names = {
+                b.get('asset'): b.get('disPlayName')
+                for b in raw.get('balances', [])
+                if isinstance(b, dict)
+            }
+
             cash_balance = Decimal('0')
             stock_value = Decimal('0')
             holdings = []
-            
-            # 잔고 처리
-            for balance in balances:
-                asset = balance.get('asset', '')
-                free = Decimal(str(balance.get('free', 0)))  # 사용 가능한 잔고
-                locked = Decimal(str(balance.get('locked', 0)))  # 주문에 묶인 잔고
-                total_amount = free + locked
-                
-                if total_amount > 0:
-                    if asset == 'USDT' or asset == 'USD':
-                        # USDT/USD는 현금으로 처리
-                        cash_balance += total_amount
-                    else:
-                        # 암호화폐는 보유 종목으로 처리
-                        # BingX는 USDT 기준 거래이므로 USDT 가치로 계산
-                        ticker = f"{asset}-USDT"
-                        
-                        # 현재가 조회
-                        current_price = Decimal('0')
-                        try:
-                            api_price = self.get_crypto_price(ticker)
-                            if api_price and api_price > 0:
-                                current_price = api_price
-                        except Exception as e:
-                            logger.warning(f"BingX 현재가 조회 실패 ({ticker}): {str(e)}")
-                        
-                        # 총 가치 계산
-                        if current_price > 0:
-                            total_value = total_amount * current_price
-                            stock_value += total_value
-                        else:
-                            total_value = Decimal('0')
-                            # 현재가 조회 실패 시 나중에 update_holdings에서 조회
-                        
-                        holdings.append({
-                            'ticker': ticker,
-                            'name': balance.get('disPlayName', asset),  # disPlayName 사용
-                            'quantity': total_amount,
-                            'current_price': current_price,
-                            'average_price': Decimal('0'),  # BingX는 평균 매수가 정보를 제공하지 않음
-                            'total_value': total_value,
-                            'currency': 'USDT',
-                        })
-            
-            # 통화별 자산 계산 (BingX는 USDT 기준)
-            total_assets_krw = Decimal('0')  # BingX는 원화 거래 없음
+
+            for asset, amount in (balance.get('total') or {}).items():
+                total_amount = Decimal(str(amount or 0))
+                if total_amount <= 0:
+                    continue
+                if asset in ('USDT', 'USD'):
+                    # USDT/USD는 현금으로 처리
+                    cash_balance += total_amount
+                    continue
+
+                # BingX는 USDT 기준 거래이므로 USDT 가치로 계산
+                ticker = f"{asset}-{self.QUOTE}"
+                current_price = self.get_crypto_price(ticker) or Decimal('0')
+                total_value = total_amount * current_price if current_price > 0 else Decimal('0')
+                stock_value += total_value
+
+                holdings.append({
+                    'ticker': ticker,
+                    'name': display_names.get(asset) or asset,
+                    'quantity': total_amount,
+                    'current_price': current_price,
+                    'average_price': Decimal('0'),  # BingX는 평균 매수가 정보를 제공하지 않음
+                    'total_value': total_value,
+                    'currency': 'USDT',
+                })
+
             total_assets_usd = cash_balance + stock_value  # USDT 기준
-            
-            # 호환성을 위한 기존 필드 (USDT를 원화로 변환하지 않음, 0으로 설정)
-            total_assets = total_assets_usd
-            
+
             return {
                 'success': True,
                 # 호환성 필드 (USDT 기준)
                 'cash_balance': cash_balance,
                 'stock_value': stock_value,
-                'total_assets': total_assets,
-                # 통화별 필드
+                'total_assets': total_assets_usd,
+                # 통화별 필드 (BingX는 원화 거래 없음)
                 'cash_balance_krw': Decimal('0'),
                 'stock_value_krw': Decimal('0'),
-                'total_assets_krw': total_assets_krw,
+                'total_assets_krw': Decimal('0'),
                 'cash_balance_usd': cash_balance,  # USDT를 USD로 처리
                 'stock_value_usd': stock_value,
                 'total_assets_usd': total_assets_usd,
                 'holdings': holdings,
-                'data': account_data
+                'data': raw,
             }
         except Exception as e:
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
+            return {'success': False, 'error': str(e)}
+
     def place_order(self, order: Order) -> Dict:
-        """BingX 주문 실행"""
+        """BingX 주문 실행. 시장가 매수도 수량(base) 기준으로 보낸다(기존 구현과 동일)."""
+        if order.order_type == 'LIMIT' and not order.price:
+            return {'success': False, 'error': '지정가 주문은 가격이 필수입니다.'}
         try:
-            symbol = order.symbol
-            ticker = symbol.ticker
-            
-            # BingX 심볼 형식 변환 (예: BTC-USDT)
-            # 티커가 이미 - 형식이 아닌 경우 USDT를 기본으로 추가
-            if '-' not in ticker:
-                ticker = f"{ticker}-USDT"
-            
-            # 주문 타입 변환
-            # BingX: MARKET, LIMIT
-            order_type = order.order_type
-            
-            # 주문 방향 변환
-            # BingX: BUY, SELL
-            side = order.side
-            
-            # 주문 파라미터 구성
-            order_data = {
-                'symbol': ticker,
-                'side': side,
-                'type': order_type,
-                'quantity': str(order.quantity)
-            }
-            
-            # 지정가 주문인 경우 가격 추가
-            if order.order_type == 'LIMIT':
-                if not order.price:
-                    return {
-                        'success': False,
-                        'error': '지정가 주문은 가격이 필수입니다.'
-                    }
-                order_data['price'] = str(order.price)
-            
-            # 주문 생성 API 호출
-            result = self._make_request('POST', '/openApi/spot/v1/trade/order', data=order_data)
-            
-            if result.get('success'):
-                order_data = result.get('data', {})
-                return {
-                    'success': True,
-                    'order_id': order_data.get('orderId') or order_data.get('order_id'),
-                    'data': order_data
-                }
-            else:
-                return result
+            self._ensure_markets()
+            price = float(order.price) if order.order_type == 'LIMIT' else None
+            result = self.exchange.create_order(
+                self.to_ccxt_symbol(order.symbol.ticker),
+                order.order_type.lower(),
+                order.side.lower(),
+                float(order.quantity),
+                price,
+            )
+            return {'success': True, 'order_id': result.get('id'), 'data': result}
         except Exception as e:
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
+            return {'success': False, 'error': str(e)}
+
+    # ccxt 통합 주문 상태 → 정규화 상태
+    _CCXT_STATUS = {
+        'open': ORDER_STATUS_OPEN,
+        'closed': ORDER_STATUS_FILLED,
+        'canceled': ORDER_STATUS_CANCELED,
+        'expired': ORDER_STATUS_CANCELED,
+        'rejected': ORDER_STATUS_REJECTED,
+    }
+
     def get_order_status(self, order: Order) -> Dict:
         """BingX 주문 상태 조회"""
+        if not order.external_order_id:
+            return {'success': False, 'error': '외부 주문 ID가 없어 상태를 조회할 수 없습니다.'}
         try:
-            symbol = order.symbol
-            ticker = symbol.ticker
-            
-            # BingX 심볼 형식 변환
-            if '-' not in ticker:
-                ticker = f"{ticker}-USDT"
-            
-            # 주문 조회 파라미터
-            params = {
-                'symbol': ticker
-            }
-            
-            # 외부 주문 ID가 있는 경우 사용
-            if order.external_order_id:
-                params['orderId'] = order.external_order_id
-            
-            # 주문 조회 API 호출
-            result = self._make_request('GET', '/openApi/spot/v1/trade/query', params=params)
-            
-            return result
+            self._ensure_markets()
+            result = self.exchange.fetch_order(order.external_order_id, self.to_ccxt_symbol(order.symbol.ticker))
+            filled = result.get('filled')
+            average = result.get('average')
+            return order_status_result(
+                self._CCXT_STATUS.get(result.get('status'), ORDER_STATUS_UNKNOWN),
+                filled_quantity=Decimal(str(filled)) if filled is not None else Decimal('0'),
+                average_price=Decimal(str(average)) if average else None,
+                external_order_id=result.get('id'),
+                raw=result,
+            )
         except Exception as e:
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
+            return {'success': False, 'error': str(e)}
+
     def get_crypto_price(self, ticker: str) -> Optional[Decimal]:
         """BingX 암호화폐 현재가 조회"""
         try:
-            # BingX 심볼 형식 변환 (BTC-USDT 형식)
-            if '-' not in ticker:
-                # 티커만 있는 경우 USDT 페어로 변환
-                ticker = f"{ticker}-USDT"
-            
-            # BingX 시세 조회 API: /openApi/spot/v1/ticker/price
-            params = {'symbol': ticker}
-            result = self._make_request('GET', '/openApi/spot/v1/ticker/price', params=params)
-            
-            if result.get('success'):
-                data = result.get('data', {})
-                price = data.get('price')
-                if price:
-                    return Decimal(str(price))
-            return None
+            self._ensure_markets()
+            last = self.exchange.fetch_ticker(self.to_ccxt_symbol(ticker)).get('last')
+            return Decimal(str(last)) if last else None
         except Exception as e:
             logger.warning(f"BingX 현재가 조회 실패 ({ticker}): {str(e)}")
             return None
-    
+
+
 class KisClient(BaseBrokerClient):
     """한국투자증권 Open API 클라이언트 (실전투자)"""
     
@@ -724,10 +642,9 @@ class KisClient(BaseBrokerClient):
             
             if response.status_code == 200:
                 result = response.json()
-                return {
-                    'success': True,
-                    'data': result
-                }
+                # 이 엔드포인트(inquire-psbl-order)는 주문 체결 조회가 아니라 주문가능 조회라 체결 상태를
+                # 해석할 수 없다(TASK-0017에서 확인). 해석 전까지 unknown으로 두어 상태를 바꾸지 않는다(기존 동작 유지).
+                return order_status_result(ORDER_STATUS_UNKNOWN, raw=result)
             else:
                 return {
                     'success': False,
