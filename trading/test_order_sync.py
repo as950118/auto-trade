@@ -3,7 +3,7 @@
 
 거래소 호출은 모두 mock이다(네트워크·실주문 없음).
 """
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
@@ -37,6 +37,28 @@ class UpbitNormalizeTestCase(SimpleTestCase):
     def test_cancel_is_canceled(self):
         r = UpbitClient._normalize_order({'state': 'cancel', 'executed_volume': '0'})
         self.assertEqual(r['status'], ORDER_STATUS_CANCELED)
+
+    def test_cancel_with_executed_volume_is_filled(self):
+        """Upbit 시장가 매수는 체결 후 'cancel'로 끝날 수 있다 — 체결분을 버리지 않는다."""
+        r = UpbitClient._normalize_order({'state': 'cancel', 'executed_volume': '0.3'})
+        self.assertEqual(r['status'], ORDER_STATUS_FILLED)
+        self.assertEqual(r['filled_quantity'], Decimal('0.3'))
+
+    def test_average_price_and_filled_at_from_trades_when_avg_price_missing(self):
+        r = UpbitClient._normalize_order({
+            'state': 'done', 'executed_volume': '0.3',
+            'trades': [
+                {'volume': '0.1', 'funds': '10000', 'created_at': '2026-09-20T10:00:00+09:00'},
+                {'volume': '0.2', 'funds': '26000', 'created_at': '2026-09-20T10:05:00+09:00'},
+            ],
+        })
+        self.assertEqual(r['average_price'], Decimal('120000'))
+        self.assertEqual(r['filled_at'], datetime(2026, 9, 20, 1, 5, tzinfo=dt_timezone.utc))
+
+    def test_done_with_zero_avg_and_no_trades_has_no_average(self):
+        r = UpbitClient._normalize_order({'state': 'done', 'executed_volume': '1', 'avg_price': '0'})
+        self.assertIsNone(r['average_price'])
+        self.assertIsNone(r['filled_at'])
 
     def test_wait_is_open_and_missing_avg_price_is_none(self):
         r = UpbitClient._normalize_order({'state': 'wait', 'executed_volume': '0.1'})
@@ -160,6 +182,38 @@ class BingXClientTestCase(_BingXFixture):
         second.exchange.load_markets.assert_not_called()
         second.exchange.set_markets.assert_called_once_with({'BTC/USDT': {'id': 'BTC-USDT'}})
 
+    def test_markets_refresh_failure_falls_back_to_stale_markets(self):
+        first = self._client()
+        first.place_order(self._order())
+        BingXClient._markets_loaded_at = 0.0  # TTL 만료
+        second = self._client()
+        second.exchange.load_markets.side_effect = Exception('wallet permission denied')
+        second.exchange.create_order.return_value = {'id': '2'}
+
+        result = second.place_order(self._order())
+
+        self.assertTrue(result['success'])
+        second.exchange.set_markets.assert_called_once_with({'BTC/USDT': {'id': 'BTC-USDT'}})
+
+    def test_markets_initial_load_failure_rejects_order(self):
+        client = self._client()
+        client.exchange.load_markets.side_effect = Exception('down')
+
+        result = client.place_order(self._order())
+
+        self.assertFalse(result['success'])
+        client.exchange.create_order.assert_not_called()
+
+    def test_get_order_status_uses_last_trade_timestamp(self):
+        client = self._client()
+        client.exchange.fetch_order.return_value = {
+            'id': 'ex-1', 'status': 'closed', 'filled': 1, 'average': 2, 'lastTradeTimestamp': 1758585600000,
+        }
+
+        result = client.get_order_status(self._order())
+
+        self.assertEqual(result['filled_at'], datetime.fromtimestamp(1758585600, tz=dt_timezone.utc))
+
     def test_account_info_maps_balances(self):
         client = self._client()
         client.exchange.fetch_balance.return_value = {
@@ -177,6 +231,53 @@ class BingXClientTestCase(_BingXFixture):
         self.assertEqual(len(info['holdings']), 1)
         self.assertEqual(info['holdings'][0]['ticker'], 'BTC-USDT')
         self.assertEqual(info['holdings'][0]['name'], 'Bitcoin')
+
+
+class BingXRealCcxtRequestTestCase(_BingXFixture):
+    """ccxt.bingx의 실제 요청 생성 코드를 가짜 마켓으로 돌려본다(네트워크 없음)."""
+
+    def _market(self, ex, market_id: str, base: str, quote: str = 'USDT') -> dict:
+        b, q = ex.safe_currency_code(base), ex.safe_currency_code(quote)
+        return {
+            'id': market_id, 'baseId': base, 'quoteId': quote, 'base': b, 'quote': q, 'symbol': f'{b}/{q}',
+            'type': 'spot', 'spot': True, 'swap': False, 'future': False, 'option': False, 'linear': None,
+            'inverse': None, 'contract': False, 'active': True,
+            'precision': {'amount': 0.0001, 'price': 0.01}, 'limits': {'amount': {'min': 0.0001}},
+        }
+
+    def _real_client(self) -> BingXClient:
+        client = BingXClient(self.account)
+        ex = client.exchange
+        ex.set_markets([
+            self._market(ex, 'BTC-USDT', 'BTC'),
+            self._market(ex, 'TRUMP-USDT', 'TRUMP'),
+            self._market(ex, 'TRUMPSOL-USDT', 'TRUMPSOL'),
+        ])
+        return client
+
+    def test_renamed_currency_ticker_maps_to_same_exchange_market(self):
+        """ccxt 기본 설정이면 TRUMP/USDT가 TRUMPSOL-USDT로 매핑돼 다른 코인이 주문된다(리뷰 M1)."""
+        client = self._real_client()
+        request = client.exchange.create_order_request(
+            client.to_ccxt_symbol('TRUMP-USDT'), 'market', 'buy', 1.5, None,
+        )
+        self.assertEqual(request['symbol'], 'TRUMP-USDT')
+
+    def test_market_buy_sends_quantity_not_quote_amount(self):
+        client = self._real_client()
+        request = client.exchange.create_order_request('BTC/USDT', 'market', 'buy', 0.012, None)
+        self.assertEqual(request, {'symbol': 'BTC-USDT', 'type': 'MARKET', 'side': 'BUY', 'quantity': 0.012})
+
+    def test_quantity_is_truncated_to_exchange_precision(self):
+        """ccxt는 거래소 정밀도에 맞춰 수량을 내림한다(기존 구현은 str 그대로 전송) — AC-2 표에 기록한 동작."""
+        client = self._real_client()
+        request = client.exchange.create_order_request('BTC/USDT', 'market', 'sell', 0.012345, None)
+        self.assertEqual(request['quantity'], 0.0123)
+
+    def test_private_currency_fetch_disabled(self):
+        client = BingXClient(self.account)
+        self.assertFalse(client.exchange.has['fetchCurrencies'])
+        self.assertEqual(client.exchange.commonCurrencies, {})
 
 
 class CheckOrderStatusTestCase(_BingXFixture):
@@ -215,6 +316,39 @@ class CheckOrderStatusTestCase(_BingXFixture):
         order.refresh_from_db()
         self.assertEqual(order.filled_at, filled_at)
         fee_hook.assert_not_called()
+
+    def test_filled_at_from_broker_goes_to_actual_fill_day(self):
+        order = self._order()
+        fill_time = datetime(2026, 9, 20, 3, 0, tzinfo=dt_timezone.utc)
+        client = self._fake_client(order_status_result(
+            ORDER_STATUS_FILLED, filled_quantity=Decimal('1'), average_price=Decimal('10'), filled_at=fill_time,
+        ))
+
+        check_order_status(order, client)
+
+        order.refresh_from_db()
+        self.assertEqual(order.filled_at, fill_time)
+        self.assertTrue(DailyRealizedProfit.objects.filter(account=self.account, date=fill_time.date()).exists())
+
+    def test_stale_copy_does_not_rerun_hooks(self):
+        """다른 스레드가 먼저 확정한 주문의 오래된 사본으로 다시 확정해도 훅은 한 번만 실행된다(리뷰 R1)."""
+        order = self._order()
+        stale_copy = Order.objects.get(pk=order.pk)
+        client = self._fake_client(order_status_result(
+            ORDER_STATUS_FILLED, filled_quantity=Decimal('0.01'), average_price=Decimal('1'),
+        ))
+
+        with patch('trading.strategy_fees.on_strategy_order_filled') as fee_hook:
+            check_order_status(order, client)
+            check_order_status(stale_copy, client)
+
+        self.assertEqual(fee_hook.call_count, 1)
+
+    def test_canceled_does_not_override_filled(self):
+        order = self._order(status=OrderStatus.FILLED, filled_at=timezone.now())
+        check_order_status(order, self._fake_client(order_status_result(ORDER_STATUS_CANCELED)))
+        order.refresh_from_db()
+        self.assertEqual(order.status, OrderStatus.FILLED)
 
     def test_open_with_partial_fill(self):
         order = self._order(status=OrderStatus.SUBMITTING)
@@ -276,6 +410,20 @@ class SyncOpenOrdersTestCase(_BingXFixture):
             self.assertEqual(untouched.status, OrderStatus.PARTIALLY_FILLED)
         filled.refresh_from_db()
         self.assertEqual(filled.status, OrderStatus.FILLED)
+
+    def test_non_crypto_broker_orders_are_not_polled(self):
+        kis, _ = Broker.objects.get_or_create(
+            code='KIS', defaults={'name': '한국투자증권', 'country': Country.KOREA, 'is_crypto_exchange': False},
+        )
+        kis_account = Account.objects.create(user=self.user, broker=kis, api_key='k2', api_secret='s2')
+        kis_symbol = Symbol.objects.create(ticker='005930', name='삼성전자', currency=Currency.KRW, broker=kis)
+        self._order(account=kis_account, symbol=kis_symbol)
+
+        with patch('trading.tasks.get_broker_client') as factory:
+            checked = sync_open_orders()
+
+        self.assertEqual(checked, 0)
+        factory.assert_not_called()
 
     def test_client_creation_failure_skips_order(self):
         order = self._order()

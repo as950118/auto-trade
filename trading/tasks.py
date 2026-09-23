@@ -265,21 +265,30 @@ def check_order_status(order: Order, client=None):
         average_price = result.get('average_price')
         external_order_id = result.get('external_order_id')
 
-        # 외부 주문 ID가 없으면 저장
+        # 상태 전이는 조건부 UPDATE로 한다(process_orders의 선점 패턴과 동일). process_orders 직후 조회와
+        # sync_open_orders가 서로 다른 스레드에서 같은 주문을 동시에 확정하더라도, 오래된 사본으로 행 전체를 덮어쓰거나
+        # 체결 훅을 두 번 실행하지 않도록 "아직 확정되지 않은 행"만 갱신하고 갱신 성공 여부로 판단한다.
+        not_final = Order.objects.filter(id=order.id).exclude(
+            status__in=[OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED]
+        )
+        updates = {}
         if external_order_id and not order.external_order_id:
-            order.external_order_id = str(external_order_id)
+            updates['external_order_id'] = str(external_order_id)
 
         if status == ORDER_STATUS_FILLED:
-            was_filled = order.status == OrderStatus.FILLED
-            order.status = OrderStatus.FILLED
-            order.filled_quantity = filled_quantity
-            order.average_filled_price = average_price
-            if not was_filled:
-                order.filled_at = timezone.now()
-            order.save()
-
-            if not was_filled:
-                # 새로 체결된 경우 일일 실현 손익 갱신 (매수도 total_buy_amount에 반영되므로 포함, TASK-0016)
+            filled_at = result.get('filled_at') or timezone.now()
+            claimed = not_final.update(
+                status=OrderStatus.FILLED,
+                filled_quantity=filled_quantity,
+                average_filled_price=average_price,
+                filled_at=filled_at,
+                updated_at=timezone.now(),
+                **updates,
+            )
+            order.refresh_from_db()
+            if claimed:
+                # 새로 체결된 경우 일일 실현 손익 갱신 (매수도 total_buy_amount에 반영되므로 포함, TASK-0016).
+                # filled_at은 거래소가 알려준 체결 시각이라 과거 주문도 실제 체결일 행에 반영된다.
                 from .profit_calculator import ProfitCalculator
                 try:
                     ProfitCalculator.update_daily_realized_profit(order.account, order.filled_at.date())
@@ -293,20 +302,25 @@ def check_order_status(order: Order, client=None):
                 except Exception as e:
                     logger.error(f"전략 수수료 훅 실패 (Order ID: {order.id}): {str(e)}")
         elif status == ORDER_STATUS_CANCELED:
-            order.status = OrderStatus.CANCELLED
-            order.save()
+            not_final.update(status=OrderStatus.CANCELLED, updated_at=timezone.now(), **updates)
+            order.refresh_from_db()
         elif status == ORDER_STATUS_REJECTED:
-            order.status = OrderStatus.REJECTED
-            order.save()
+            not_final.update(status=OrderStatus.REJECTED, updated_at=timezone.now(), **updates)
+            order.refresh_from_db()
         elif status == ORDER_STATUS_OPEN and filled_quantity > 0:
             # 부분 체결
-            order.status = OrderStatus.PARTIALLY_FILLED
-            order.filled_quantity = filled_quantity
-            order.average_filled_price = average_price
-            order.save()
-        else:
-            # 미체결(open, 체결 0) 또는 해석 불가(unknown) — 상태를 바꾸지 않는다
-            order.save()
+            not_final.update(
+                status=OrderStatus.PARTIALLY_FILLED,
+                filled_quantity=filled_quantity,
+                average_filled_price=average_price,
+                updated_at=timezone.now(),
+                **updates,
+            )
+            order.refresh_from_db()
+        elif updates:
+            # 미체결(open, 체결 0) 또는 해석 불가(unknown) — 상태는 바꾸지 않고 외부 주문 ID만 채운다
+            Order.objects.filter(id=order.id).update(updated_at=timezone.now(), **updates)
+            order.refresh_from_db()
 
         logger.info(f"주문 상태 업데이트 완료 (Order ID: {order.id}, Status: {order.status})")
 
@@ -319,13 +333,15 @@ def sync_open_orders(lookback_days: int = 7) -> int:
     아직 확정되지 않은 주문(PARTIALLY_FILLED + 외부 주문 ID 있음)의 상태를 브로커에 다시 조회한다(TASK-0017).
 
     예전에는 주문 직후 check_order_status()를 한 번만 호출해, 그 시점에 체결되지 않은 주문은 영영 확정되지 않았다.
-    lookback_days보다 오래된 주문은 거래소 조회 보존 기간을 넘었을 수 있어 대상에서 뺀다(과거분 보정은 별도).
+    lookback_days보다 오래된 주문은 거래소 조회 보존 기간을 넘었을 수 있어 대상에서 뺀다(과거분 보정은 별도, TASK-0017 AC-3).
     """
     since = timezone.now() - timedelta(days=lookback_days)
     orders = (
         Order.objects.filter(
             status=OrderStatus.PARTIALLY_FILLED,
             created_at__gte=since,
+            # KIS는 아직 체결 상태를 해석하지 못해(unknown) 재조회해도 확정되지 않으므로 제외한다
+            account__broker__is_crypto_exchange=True,
         )
         .exclude(external_order_id__isnull=True)
         .exclude(external_order_id='')

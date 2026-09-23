@@ -8,8 +8,9 @@ import pyupbit
 import time
 from decimal import Decimal, ROUND_DOWN
 from typing import Dict, Optional
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from .models import Account, Order, Symbol
 
 logger = logging.getLogger(__name__)
@@ -28,15 +29,20 @@ def order_status_result(
     filled_quantity: Decimal = Decimal('0'),
     average_price: Optional[Decimal] = None,
     external_order_id: Optional[str] = None,
+    filled_at: Optional[datetime] = None,
     raw=None,
 ) -> Dict:
-    """get_order_status()의 성공 응답. 'data'는 브로커 원본 응답(하위 호환·디버깅용)."""
+    """
+    get_order_status()의 성공 응답. 'data'는 브로커 원본 응답(하위 호환·디버깅용).
+    filled_at은 거래소가 알려준 마지막 체결 시각이다(모르면 None — 호출부가 조회 시각으로 대신한다).
+    """
     return {
         'success': True,
         'status': status,
         'filled_quantity': filled_quantity,
         'average_price': average_price,
         'external_order_id': external_order_id,
+        'filled_at': filled_at,
         'data': raw,
     }
 
@@ -299,13 +305,31 @@ class UpbitClient(BaseBrokerClient):
     @staticmethod
     def _normalize_order(data: Dict) -> Dict:
         """
-        Upbit 주문 응답 → 정규화 상태. 기존 tasks.check_order_status()의 Upbit 해석을 그대로 옮겼다:
-        state 'done' → filled, 'cancel' → canceled, 그 외는 open(executed_volume > 0이면 부분체결).
+        Upbit 주문 응답 → 정규화 상태.
+
+        기존 tasks.check_order_status()의 해석(state 'done' → filled, 'cancel' → canceled, 그 외 open)을 옮기면서
+        두 가지를 바로잡았다(TASK-0017 리뷰):
+        - 'cancel'이어도 executed_volume > 0이면 체결된 수량이 있으므로 filled로 본다. Upbit 시장가 매수는 체결 후
+          남은 잔액 때문에 'cancel'로 끝날 수 있어, 예전에는 체결분이 CANCELLED로 사라졌다.
+        - 평균 체결가는 avg_price가 있으면 쓰고, 없으면 trades(funds/volume 합)로 계산한다. 체결 시각은 마지막 trade 시각이다.
         """
         state = data.get('state')
         executed_volume = Decimal(str(float(data.get('executed_volume', 0))))
-        avg_price = float(data.get('avg_price', 0))
-        if state == 'done':
+
+        trades = [t for t in (data.get('trades') or []) if isinstance(t, dict)]
+        average_price = None
+        avg_price = float(data.get('avg_price', 0) or 0)
+        if avg_price > 0:
+            average_price = Decimal(str(avg_price))
+        else:
+            trade_volume = sum((Decimal(str(t.get('volume') or 0)) for t in trades), Decimal('0'))
+            trade_funds = sum((Decimal(str(t.get('funds') or 0)) for t in trades), Decimal('0'))
+            if trade_volume > 0 and trade_funds > 0:
+                average_price = trade_funds / trade_volume
+        trade_times = [parse_datetime(t['created_at']) for t in trades if t.get('created_at')]
+        filled_at = max((t for t in trade_times if t), default=None)
+
+        if state == 'done' or (state == 'cancel' and executed_volume > 0):
             status = ORDER_STATUS_FILLED
         elif state == 'cancel':
             status = ORDER_STATUS_CANCELED
@@ -314,8 +338,9 @@ class UpbitClient(BaseBrokerClient):
         return order_status_result(
             status,
             filled_quantity=executed_volume,
-            average_price=Decimal(str(avg_price)) if avg_price > 0 else None,
+            average_price=average_price,
             external_order_id=data.get('uuid'),
+            filled_at=filled_at,
             raw=data,
         )
 
@@ -347,14 +372,30 @@ class BingXClient(BaseBrokerClient):
             'enableRateLimit': True,
             'timeout': 10000,
             'options': {'defaultType': 'spot'},
+            # load_markets()가 키가 있으면 private 지갑 API(fetch_currencies)까지 호출한다. 권한이 없거나 실패하면
+            # 주문이 전부 막히므로 끈다 — 통화 정보는 마켓 목록에서 파생된다.
+            'has': {'fetchCurrencies': False},
         })
+        # ccxt는 일부 코인을 다른 이름으로 바꿔 부른다(bingx: TRUMP→TRUMPMAGA, TRUMPSOL→TRUMP 등). 그대로 두면
+        # 우리 Symbol 'TRUMP-USDT' 주문이 다른 코인(TRUMPSOL-USDT)으로 나가므로 거래소 원래 이름을 쓴다.
+        # 생성자 설정은 deep-merge라 빈 dict로는 지워지지 않아 생성 후에 비운다.
+        self.exchange.commonCurrencies = {}
 
     def _ensure_markets(self):
         cls = BingXClient
-        if cls._markets is None or time.time() - cls._markets_loaded_at > cls.MARKETS_TTL_SEC:
-            cls._markets = self.exchange.load_markets()
+        fresh = cls._markets is not None and time.time() - cls._markets_loaded_at <= cls.MARKETS_TTL_SEC
+        if fresh:
+            if not self.exchange.markets:
+                self.exchange.set_markets(cls._markets)
+            return
+        try:
+            cls._markets = self.exchange.load_markets(reload=True)
             cls._markets_loaded_at = time.time()
-        elif not self.exchange.markets:
+        except Exception:
+            if cls._markets is None:
+                raise
+            # 갱신 실패 시 이전 마켓 목록으로 계속 동작한다(주문 경로가 마켓 조회 장애에 막히지 않도록)
+            logger.warning('BingX 마켓 목록 갱신 실패, 이전 목록 사용', exc_info=True)
             self.exchange.set_markets(cls._markets)
 
     @classmethod
@@ -464,11 +505,13 @@ class BingXClient(BaseBrokerClient):
             result = self.exchange.fetch_order(order.external_order_id, self.to_ccxt_symbol(order.symbol.ticker))
             filled = result.get('filled')
             average = result.get('average')
+            last_trade_ms = result.get('lastTradeTimestamp')
             return order_status_result(
                 self._CCXT_STATUS.get(result.get('status'), ORDER_STATUS_UNKNOWN),
                 filled_quantity=Decimal(str(filled)) if filled is not None else Decimal('0'),
                 average_price=Decimal(str(average)) if average else None,
                 external_order_id=result.get('id'),
+                filled_at=datetime.fromtimestamp(last_trade_ms / 1000, tz=dt_timezone.utc) if last_trade_ms else None,
                 raw=result,
             )
         except Exception as e:
