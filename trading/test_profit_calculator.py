@@ -1,8 +1,8 @@
 """
 ProfitCalculator(실현 손익, FIFO) 동작 고정 테스트 (TASK-0009).
 
-순수 계산 함수(calculations.py)로 추출하기 전의 동작을 그대로 고정한다. 리팩터링 전후 모두
-같은 결과가 나와야 한다.
+ProfitCalculatorTestCase는 순수 계산 함수(calculations.py)로 추출하기 전의 동작을 고정한다.
+추출 전 코드에서 먼저 실행해 통과를 확인했고, 추출 후에도 같은 결과가 나와야 한다.
 """
 from datetime import date, datetime
 from decimal import Decimal
@@ -83,6 +83,20 @@ class ProfitCalculatorTestCase(TestCase):
 
         self.assertEqual(ProfitCalculator.calculate_realized_profit_for_order(sell), Decimal('50'))
 
+    def test_sell_after_prior_sells_exhausted_all_lots_has_zero_cost(self):
+        self._filled('BUY', '1', '100', 1)
+        self._filled('SELL', '3', '150', 2)
+        sell = self._filled('SELL', '1', '150', 3)
+
+        self.assertEqual(ProfitCalculator.calculate_realized_profit_for_order(sell), Decimal('150'))
+
+    def test_zero_quantity_buy_is_ignored(self):
+        self._filled('BUY', '0', '50', 1)
+        self._filled('BUY', '1', '100', 2)
+        sell = self._filled('SELL', '1', '150', 3)
+
+        self.assertEqual(ProfitCalculator.calculate_realized_profit_for_order(sell), Decimal('50'))
+
     def test_unfilled_or_buy_order_returns_zero(self):
         buy = self._filled('BUY', '1', '100', 1)
         pending = Order.objects.create(
@@ -104,8 +118,8 @@ class ProfitCalculatorTestCase(TestCase):
         self.assertEqual(result['realized_profit'], Decimal('300'))
         self.assertEqual(result['total_sell_amount'], Decimal('600'))
         self.assertEqual(result['realized_profit_rate'], Decimal('50'))
-        # 현재 동작: total_buy_amount는 어디서도 누적되지 않아 항상 0이다(TASK-0009에서 발견,
-        # 동작 변경은 별도 결정 사항이라 여기서는 현 상태를 고정만 한다).
+        # 현재 동작: total_buy_amount는 어디서도 누적되지 않아 항상 0이다. 버그로 추적 중이다
+        # (TASK-0016). 고칠 때는 이 단언을 새 정의에 맞게 바꾼다 — 이 테스트를 지우거나 되돌리지 말 것.
         self.assertEqual(result['total_buy_amount'], Decimal('0'))
 
     def test_daily_realized_profit_rate_is_zero_without_sells(self):
@@ -151,3 +165,8 @@ class CalculationsTestCase(SimpleTestCase):
         self.assertEqual(rebalance_quantity(Decimal('300'), Decimal('100'), Decimal('0'), quant), Decimal('3'))
         self.assertEqual(rebalance_quantity(Decimal('-500'), Decimal('100'), Decimal('2'), quant), Decimal('2'))
         self.assertEqual(rebalance_quantity(Decimal('-100'), Decimal('100'), Decimal('0'), quant), Decimal('0'))
+        self.assertEqual(rebalance_quantity(Decimal('-100'), Decimal('100'), Decimal('-1'), quant), Decimal('0'))
+        # 수량 단위보다 작은 매도는 0으로 내림된다
+        self.assertEqual(
+            rebalance_quantity(Decimal('-0.01'), Decimal('100000000000'), Decimal('1'), quant), Decimal('0')
+        )

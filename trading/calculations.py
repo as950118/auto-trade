@@ -28,6 +28,7 @@ def consume_fifo(lots: Iterable[Lot], quantity: Decimal) -> Tuple[Decimal, List[
     Returns:
         (소진한 수량의 매수 원가 합계, 소진 후 남은 로트 목록 — 입력 순서 유지)
         보유 로트보다 많이 소진하려 하면 초과분은 원가 0으로 취급한다(기존 동작).
+        quantity가 0 이하이면 아무것도 소진하지 않는다(원가 0, 로트 그대로).
     """
     remaining_to_consume = quantity
     cost = ZERO
