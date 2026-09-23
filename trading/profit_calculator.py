@@ -4,9 +4,10 @@
 import logging
 from decimal import Decimal
 from datetime import date, datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from django.db.models import Q, Sum, F
 from django.utils import timezone
+from .calculations import Lot, fifo_realized_profit, profit_rate_percent
 from .models import Order, Account, OrderStatus, DailyRealizedProfit
 
 logger = logging.getLogger(__name__)
@@ -16,15 +17,14 @@ class ProfitCalculator:
     """실현 손익 계산기"""
     
     @staticmethod
-    def _get_available_buy_lots(account: Account, symbol, before_sell_order: Order) -> List[Dict]:
+    def _load_fifo_inputs(account: Account, symbol, before_sell_order: Order) -> Tuple[List[Lot], List[Decimal]]:
         """
-        주어진 매도 주문 시점 기준으로 아직 소진되지 않은 매수 로트(lot) 목록을
-        FIFO 순서로 반환한다.
+        주어진 매도 주문 시점 이전에 체결된 매수 로트(FIFO 순)와 앞선 매도 수량 목록을 조회한다.
 
-        이 계좌·종목에 대해 `before_sell_order`보다 먼저 체결된 다른 매도 주문들이
-        이미 소진한 매수 수량을 반영해야 한다. 그렇지 않으면 같은 종목을 두 번 이상
+        앞선 매도들이 이미 소진한 매수 수량을 반영해야 한다. 그렇지 않으면 같은 종목을 두 번 이상
         매도할 때마다 앞선 매수 주문들이 매번 "전체 수량이 그대로 남아있는 것"으로
         재계산되어, 두 번째 매도부터 실현 손익 원가가 중복 차감되는 버그가 발생한다.
+        소진 계산 자체는 calculations.fifo_realized_profit()이 한다.
         """
         buy_orders = Order.objects.filter(
             account=account,
@@ -35,10 +35,10 @@ class ProfitCalculator:
         ).order_by('filled_at', 'id')
 
         lots = [
-            {
-                'remaining': Decimal(str(buy_order.filled_quantity)),
-                'price': Decimal(str(buy_order.average_filled_price)),
-            }
+            Lot(
+                quantity=Decimal(str(buy_order.filled_quantity)),
+                price=Decimal(str(buy_order.average_filled_price)),
+            )
             for buy_order in buy_orders
             if buy_order.filled_quantity and buy_order.average_filled_price
         ]
@@ -51,20 +51,13 @@ class ProfitCalculator:
             filled_at__lt=before_sell_order.filled_at
         ).order_by('filled_at', 'id')
 
-        for prior_sell in prior_sell_orders:
-            if not prior_sell.filled_quantity:
-                continue
-            remaining_to_consume = Decimal(str(prior_sell.filled_quantity))
-            for lot in lots:
-                if remaining_to_consume <= 0:
-                    break
-                if lot['remaining'] <= 0:
-                    continue
-                consumed = min(lot['remaining'], remaining_to_consume)
-                lot['remaining'] -= consumed
-                remaining_to_consume -= consumed
+        prior_sell_quantities = [
+            Decimal(str(prior_sell.filled_quantity))
+            for prior_sell in prior_sell_orders
+            if prior_sell.filled_quantity
+        ]
 
-        return lots
+        return lots, prior_sell_quantities
 
     @staticmethod
     def calculate_realized_profit_for_order(sell_order: Order) -> Decimal:
@@ -83,33 +76,15 @@ class ProfitCalculator:
         if not sell_order.filled_quantity or not sell_order.average_filled_price:
             return Decimal('0')
 
-        account = sell_order.account
-        symbol = sell_order.symbol
-        sell_quantity = Decimal(str(sell_order.filled_quantity))
-        sell_price = Decimal(str(sell_order.average_filled_price))
-
-        # 이전 매도 주문들이 이미 소진한 수량을 제외한, 이 매도 시점에 실제로
-        # 남아있는 매수 로트만 FIFO 순서로 가져온다.
-        lots = ProfitCalculator._get_available_buy_lots(account, symbol, sell_order)
-
-        remaining_sell_quantity = sell_quantity
-        total_cost = Decimal('0')
-
-        for lot in lots:
-            if remaining_sell_quantity <= 0:
-                break
-            if lot['remaining'] <= 0:
-                continue
-
-            matched_quantity = min(lot['remaining'], remaining_sell_quantity)
-            total_cost += matched_quantity * lot['price']
-            remaining_sell_quantity -= matched_quantity
-
-        # 실현 손익 = 매도 금액 - 매수 원가
-        total_sell_amount = sell_quantity * sell_price
-        realized_profit = total_sell_amount - total_cost
-
-        return realized_profit
+        lots, prior_sell_quantities = ProfitCalculator._load_fifo_inputs(
+            sell_order.account, sell_order.symbol, sell_order
+        )
+        return fifo_realized_profit(
+            lots,
+            prior_sell_quantities,
+            sell_quantity=Decimal(str(sell_order.filled_quantity)),
+            sell_price=Decimal(str(sell_order.average_filled_price)),
+        )
     
     @staticmethod
     def calculate_daily_realized_profit(account: Account, target_date: date) -> Dict:
@@ -154,10 +129,7 @@ class ProfitCalculator:
                 sell_amount = Decimal(str(sell_order.filled_quantity)) * Decimal(str(sell_order.average_filled_price))
                 total_sell_amount += sell_amount
         
-        # 실현 손익률 계산
-        realized_profit_rate = Decimal('0')
-        if total_sell_amount > 0:
-            realized_profit_rate = (total_realized_profit / total_sell_amount) * Decimal('100')
+        realized_profit_rate = profit_rate_percent(total_realized_profit, total_sell_amount)
         
         return {
             'realized_profit': total_realized_profit,
@@ -231,9 +203,7 @@ class ProfitCalculator:
             total_buy_amount += profit_data['total_buy_amount']
             total_sell_amount += profit_data['total_sell_amount']
         
-        realized_profit_rate = Decimal('0')
-        if total_sell_amount > 0:
-            realized_profit_rate = (total_realized_profit / total_sell_amount) * Decimal('100')
+        realized_profit_rate = profit_rate_percent(total_realized_profit, total_sell_amount)
         
         return {
             'date': target_date,
