@@ -1,4 +1,6 @@
 beautifulsoup4==4.14.3
+# ccxt 최신(4.5.82)은 cryptography>=50을 요구해 pyOpenSSL==26.3.0(cryptography<50)과 충돌 — 호환되는 4.5.64로 고정 (ADR-0004)
+ccxt==4.5.64
 Django==4.2.27
 django-apscheduler==0.7.0
 django-cors-headers==4.3.1

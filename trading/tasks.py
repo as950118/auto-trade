@@ -2,12 +2,19 @@
 주문 처리 태스크 및 계좌 정보 업데이트
 """
 import logging
+from datetime import timedelta
 from decimal import Decimal
 from django.utils import timezone
 from django.db import transaction
 from django.db.models import F
 from .models import Order, OrderStatus, Account, Holding, Symbol, Currency, TargetAllocationPlan
-from .clients import get_broker_client
+from .clients import (
+    ORDER_STATUS_CANCELED,
+    ORDER_STATUS_FILLED,
+    ORDER_STATUS_OPEN,
+    ORDER_STATUS_REJECTED,
+    get_broker_client,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -234,83 +241,128 @@ def run_target_allocation_plans():
 
 
 def check_order_status(order: Order, client=None):
-    """주문 상태 확인 및 업데이트"""
+    """
+    주문 상태 확인 및 업데이트.
+
+    브로커 클라이언트가 돌려주는 정규화 상태(clients.order_status_result, ADR-0004)만 해석한다.
+    예전에는 broker.name에 'upbit'가 들어간 경우만 해석하고 BingX/KIS는 아무것도 하지 않아
+    주문이 PARTIALLY_FILLED에서 확정되지 않았다(TASK-0017).
+    """
     if not client:
         try:
             client = get_broker_client(order.account)
         except Exception as e:
             logger.error(f"클라이언트 생성 실패: {str(e)}")
             return
-    
+
     try:
         result = client.get_order_status(order)
-        
-        if result.get('success'):
-            data = result.get('data', {})
-            
-            # 브로커별로 응답 형식이 다르므로 각각 처리
-            broker = order.account.broker
-            
-            if broker.is_crypto_exchange and 'upbit' in broker.name.lower():
-                # Upbit 응답 처리
-                if isinstance(data, dict):
-                    state = data.get('state')
-                    executed_volume = float(data.get('executed_volume', 0))
-                    avg_price = float(data.get('avg_price', 0))
-                    uuid = data.get('uuid')  # Upbit 주문 UUID
-                    
-                    # 외부 주문 ID가 없으면 저장
-                    if uuid and not order.external_order_id:
-                        order.external_order_id = uuid
-                    
-                    if state == 'done':
-                        # 체결 완료
-                        was_filled = order.status == OrderStatus.FILLED
-                        order.status = OrderStatus.FILLED
-                        order.filled_quantity = Decimal(str(executed_volume))
-                        order.average_filled_price = Decimal(str(avg_price)) if avg_price > 0 else None
-                        order.filled_at = timezone.now()
-                        
-                        # 새로 체결된 경우 일일 실현 손익 갱신 (매수도 total_buy_amount에 반영되므로 포함, TASK-0016)
-                        if not was_filled:
-                            from .profit_calculator import ProfitCalculator
-                            try:
-                                ProfitCalculator.update_daily_realized_profit(
-                                    order.account,
-                                    order.filled_at.date()
-                                )
-                            except Exception as e:
-                                logger.error(f"실현 손익 계산 실패 (Order ID: {order.id}): {str(e)}")
+        if not result.get('success'):
+            return
 
-                        # 전략 연동 주문 수수료 훅 (현재 no-op — strategy_fees 참고)
-                        if not was_filled:
-                            try:
-                                from .strategy_fees import on_strategy_order_filled
-                                on_strategy_order_filled(order)
-                            except Exception as e:
-                                logger.error(f"전략 수수료 훅 실패 (Order ID: {order.id}): {str(e)}")
-                    elif state == 'cancel':
-                        # 취소됨
-                        order.status = OrderStatus.CANCELLED
-                    elif executed_volume > 0:
-                        # 부분 체결
-                        order.status = OrderStatus.PARTIALLY_FILLED
-                        order.filled_quantity = Decimal(str(executed_volume))
-                        order.average_filled_price = Decimal(str(avg_price)) if avg_price > 0 else None
-            
-            else:
-                # 한국투자증권 응답 처리
-                # 실제 API 응답 형식에 맞게 수정 필요
-                output = data.get('output', [])
-                if isinstance(output, list) and len(output) > 0:
-                    # 주문 상태 확인 로직 구현
-                    pass
-            
-            order.save()
-            logger.info(f"주문 상태 업데이트 완료 (Order ID: {order.id}, Status: {order.status})")
-        
+        status = result.get('status')
+        filled_quantity = result.get('filled_quantity') or Decimal('0')
+        average_price = result.get('average_price')
+        external_order_id = result.get('external_order_id')
+
+        # 상태 전이는 조건부 UPDATE로 한다(process_orders의 선점 패턴과 동일). process_orders 직후 조회와
+        # sync_open_orders가 서로 다른 스레드에서 같은 주문을 동시에 확정하더라도, 오래된 사본으로 행 전체를 덮어쓰거나
+        # 체결 훅을 두 번 실행하지 않도록 "아직 확정되지 않은 행"만 갱신하고 갱신 성공 여부로 판단한다.
+        not_final = Order.objects.filter(id=order.id).exclude(
+            status__in=[OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED]
+        )
+        updates = {}
+        if external_order_id and not order.external_order_id:
+            updates['external_order_id'] = str(external_order_id)
+
+        if status == ORDER_STATUS_FILLED:
+            filled_at = result.get('filled_at') or timezone.now()
+            claimed = not_final.update(
+                status=OrderStatus.FILLED,
+                filled_quantity=filled_quantity,
+                average_filled_price=average_price,
+                filled_at=filled_at,
+                updated_at=timezone.now(),
+                **updates,
+            )
+            order.refresh_from_db()
+            if claimed:
+                # 새로 체결된 경우 일일 실현 손익 갱신 (매수도 total_buy_amount에 반영되므로 포함, TASK-0016).
+                # filled_at은 거래소가 알려준 체결 시각이라 과거 주문도 실제 체결일 행에 반영된다.
+                from .profit_calculator import ProfitCalculator
+                try:
+                    ProfitCalculator.update_daily_realized_profit(order.account, order.filled_at.date())
+                except Exception as e:
+                    logger.error(f"실현 손익 계산 실패 (Order ID: {order.id}): {str(e)}")
+
+                # 전략 연동 주문 수수료 훅 (현재 no-op — strategy_fees 참고)
+                try:
+                    from .strategy_fees import on_strategy_order_filled
+                    on_strategy_order_filled(order)
+                except Exception as e:
+                    logger.error(f"전략 수수료 훅 실패 (Order ID: {order.id}): {str(e)}")
+        elif status == ORDER_STATUS_CANCELED:
+            not_final.update(status=OrderStatus.CANCELLED, updated_at=timezone.now(), **updates)
+            order.refresh_from_db()
+        elif status == ORDER_STATUS_REJECTED:
+            not_final.update(status=OrderStatus.REJECTED, updated_at=timezone.now(), **updates)
+            order.refresh_from_db()
+        elif status == ORDER_STATUS_OPEN and filled_quantity > 0:
+            # 부분 체결
+            not_final.update(
+                status=OrderStatus.PARTIALLY_FILLED,
+                filled_quantity=filled_quantity,
+                average_filled_price=average_price,
+                updated_at=timezone.now(),
+                **updates,
+            )
+            order.refresh_from_db()
+        elif updates:
+            # 미체결(open, 체결 0) 또는 해석 불가(unknown) — 상태는 바꾸지 않고 외부 주문 ID만 채운다
+            Order.objects.filter(id=order.id).update(updated_at=timezone.now(), **updates)
+            order.refresh_from_db()
+
+        logger.info(f"주문 상태 업데이트 완료 (Order ID: {order.id}, Status: {order.status})")
+
     except Exception as e:
         logger.error(f"주문 상태 확인 실패 (Order ID: {order.id}): {str(e)}")
+
+
+def sync_open_orders(lookback_days: int = 7) -> int:
+    """
+    아직 확정되지 않은 주문(PARTIALLY_FILLED + 외부 주문 ID 있음)의 상태를 브로커에 다시 조회한다(TASK-0017).
+
+    예전에는 주문 직후 check_order_status()를 한 번만 호출해, 그 시점에 체결되지 않은 주문은 영영 확정되지 않았다.
+    lookback_days보다 오래된 주문은 거래소 조회 보존 기간을 넘었을 수 있어 대상에서 뺀다(과거분 보정은 별도, TASK-0017 AC-3).
+    """
+    since = timezone.now() - timedelta(days=lookback_days)
+    orders = (
+        Order.objects.filter(
+            status=OrderStatus.PARTIALLY_FILLED,
+            created_at__gte=since,
+            # KIS는 아직 체결 상태를 해석하지 못해(unknown) 재조회해도 확정되지 않으므로 제외한다
+            account__broker__is_crypto_exchange=True,
+        )
+        .exclude(external_order_id__isnull=True)
+        .exclude(external_order_id='')
+        .select_related('account__broker', 'symbol')
+    )
+
+    clients = {}
+    checked = 0
+    for order in orders:
+        client = clients.get(order.account_id)
+        if client is None:
+            try:
+                client = get_broker_client(order.account)
+            except Exception as e:
+                logger.error(f"클라이언트 생성 실패 (Account ID: {order.account_id}): {str(e)}")
+                continue
+            clients[order.account_id] = client
+        check_order_status(order, client)
+        checked += 1
+    logger.info(f"미확정 주문 재조회 완료: {checked}건")
+    return checked
 
 
 def update_accounts_info():

@@ -37,6 +37,16 @@ def start_scheduler():
         replace_existing=True,
     )
     
+    # 미확정 주문 재조회 작업 등록 (TASK-0017, 기본 5분마다)
+    order_sync_interval = getattr(settings, 'ORDER_SYNC_INTERVAL_MINUTES', 5)
+    scheduler.add_job(
+        sync_open_orders_job,
+        trigger=IntervalTrigger(minutes=order_sync_interval),
+        id='sync_open_orders',
+        name='미확정 주문 재조회',
+        replace_existing=True,
+    )
+
     # 계좌 정보 업데이트 작업 등록 (1분마다 실행)
     scheduler.add_job(
         update_accounts_info_job,
@@ -420,3 +430,16 @@ def update_crypto_prices_job():
         logger.error(error_msg)
         # 에러 알림도 생략 (너무 자주 실행되므로)
 
+
+def sync_open_orders_job():
+    """미확정(PARTIALLY_FILLED) 주문 상태 재조회 작업 (스케줄러에서 호출, TASK-0017)"""
+    from .tasks import sync_open_orders
+
+    try:
+        lookback_days = getattr(settings, 'ORDER_SYNC_LOOKBACK_DAYS', 7)
+        checked = sync_open_orders(lookback_days=lookback_days)
+        if checked:
+            logger.info(f"미확정 주문 재조회: {checked}건")
+    except Exception as e:
+        # 자주 실행되므로 알림은 생략
+        logger.error(f"미확정 주문 재조회 작업 실행 중 오류: {str(e)}")
