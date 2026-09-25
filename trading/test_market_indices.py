@@ -132,3 +132,21 @@ class SchedulerJobTestCase(SimpleTestCase):
         with patch.object(mi, 'refresh_market_indices', side_effect=RuntimeError('boom')) as refresh:
             refresh_market_indices_job()  # 예외가 스케줄러로 새지 않는다
         refresh.assert_called_once()
+
+    def test_refresh_job_registered_to_run_at_startup_even_if_late(self):
+        """재시작 직후 첫 갱신이 misfire로 버려지지 않아야 한다(기본 유예 1초)."""
+        from unittest.mock import MagicMock as MM
+
+        from . import scheduler as sched
+
+        fake = MM()
+        with patch.object(sched, 'BackgroundScheduler', return_value=fake), \
+                patch.object(sched, 'DjangoJobStore'), patch.object(sched, 'register_events'):
+            try:
+                sched.start_scheduler()
+            except Exception:
+                pass  # 이 테스트는 add_job 인자만 본다
+        kwargs = next(c.kwargs for c in fake.add_job.call_args_list if c.kwargs.get('id') == 'refresh_market_indices')
+        self.assertIsNone(kwargs['misfire_grace_time'])
+        self.assertTrue(kwargs['coalesce'])
+        self.assertIsNotNone(kwargs['next_run_time'])

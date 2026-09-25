@@ -56,6 +56,10 @@ def start_scheduler():
         name='주요 지수 갱신',
         replace_existing=True,
         next_run_time=dj_timezone.now(),
+        # 시작 시 job을 DB jobstore에 쓰는 동안 1초(기본 misfire 유예)를 넘기면 첫 실행이 '놓친 실행'으로 버려져
+        # 재시작 후 최대 10분간 지수가 비어 보인다. 늦더라도 한 번은 실행하고, 밀린 실행은 하나로 합친다.
+        misfire_grace_time=None,
+        coalesce=True,
     )
 
     # 계좌 정보 업데이트 작업 등록 (1분마다 실행)
