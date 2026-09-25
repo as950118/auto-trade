@@ -136,9 +136,10 @@ def me(request):
     summary='주요 지수 요약',
     description=(
         '코스피·코스닥·나스닥·S&P 500의 현재값, 전일 대비, 최근 30거래일 종가 추이를 반환합니다. '
-        '외부 시세(FinanceDataReader) 기반이며 10분 캐시합니다. 조회에 실패한 지수는 목록에서 빠집니다.'
+        '스케줄러가 10분마다 갱신한 캐시만 읽습니다(요청 중 외부 호출 없음). 갱신에 실패한 지수는 직전 값을 '
+        'stale=true로 유지하고, 아직 한 번도 받지 못한 지수는 목록에서 빠집니다.'
     ),
-    responses={200: OpenApiResponse(description='{"indices": [{code, name, value, change, change_rate, as_of, series}]}')},
+    responses={200: OpenApiResponse(description='{"indices": [{code, name, value, change, change_rate, as_of, series, stale}]}')},
     tags=['시세']
 )
 @api_view(['GET'])

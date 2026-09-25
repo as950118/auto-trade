@@ -47,6 +47,17 @@ def start_scheduler():
         replace_existing=True,
     )
 
+    # 주요 지수 갱신 (TASK-0018, ADR-0005): 시작 직후 한 번, 이후 10분마다. API는 캐시만 읽는다
+    from django.utils import timezone as dj_timezone
+    scheduler.add_job(
+        refresh_market_indices_job,
+        trigger=IntervalTrigger(minutes=getattr(settings, 'MARKET_INDICES_REFRESH_MINUTES', 10)),
+        id='refresh_market_indices',
+        name='주요 지수 갱신',
+        replace_existing=True,
+        next_run_time=dj_timezone.now(),
+    )
+
     # 계좌 정보 업데이트 작업 등록 (1분마다 실행)
     scheduler.add_job(
         update_accounts_info_job,
@@ -443,3 +454,16 @@ def sync_open_orders_job():
     except Exception as e:
         # 자주 실행되므로 알림은 생략
         logger.error(f"미확정 주문 재조회 작업 실행 중 오류: {str(e)}")
+
+
+def refresh_market_indices_job():
+    """주요 지수 캐시 갱신 (스케줄러에서 호출, TASK-0018 / ADR-0005). 요청마다 외부 호출하지 않도록 여기서만 받는다."""
+    from .services.market_indices import refresh_market_indices
+
+    try:
+        indices = refresh_market_indices()
+        stale = [i['code'] for i in indices if i.get('stale')]
+        if stale:
+            logger.warning(f"주요 지수 일부 갱신 실패, 직전 값 유지: {stale}")
+    except Exception as e:
+        logger.error(f"주요 지수 갱신 작업 실행 중 오류: {str(e)}")
