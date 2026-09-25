@@ -133,6 +133,24 @@ def me(request):
 
 
 @extend_schema(
+    summary='주요 지수 요약',
+    description=(
+        '코스피·코스닥·나스닥·S&P 500의 현재값, 전일 대비, 최근 30거래일 종가 추이를 반환합니다. '
+        '외부 시세(FinanceDataReader) 기반이며 10분 캐시합니다. 조회에 실패한 지수는 목록에서 빠집니다.'
+    ),
+    responses={200: OpenApiResponse(description='{"indices": [{code, name, value, change, change_rate, as_of, series}]}')},
+    tags=['시세']
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def market_indices(request):
+    """대시보드 지수 카드용 주요 지수 요약 (TASK-0018, ADR-0005)"""
+    from .services.market_indices import get_market_indices
+
+    return Response({'indices': get_market_indices()})
+
+
+@extend_schema(
     summary='비밀번호 설정/변경',
     description=(
         '로그인된 사용자가 비밀번호를 설정하거나 변경합니다. '

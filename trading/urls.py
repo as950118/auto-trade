@@ -6,7 +6,7 @@ from .views import (
     BrokerViewSet, HoldingViewSet, TargetAllocationPlanViewSet, ExchangeFeeRebateViewSet,
     StrategyViewSet, StrategyLinkViewSet, AlertEventViewSet, AlertTradePlanViewSet, signup,
     PortfolioViewSet, PortfolioLinkViewSet, CongressMemberViewSet, health_check,
-    KrDisclosureViewSet, KrFinancialFactViewSet, me, set_password,
+    KrDisclosureViewSet, KrFinancialFactViewSet, me, set_password, market_indices,
 )
 from .oauth2_views import google_oauth2_login, google_oauth2_callback
 from .webhooks import tradingview_webhook
@@ -35,6 +35,7 @@ urlpatterns = [
     path('api/users/', signup, name='signup'),
     path('api/users/me/', me, name='me'),
     path('api/users/me/password/', set_password, name='set-password'),
+    path('api/market/indices/', market_indices, name='market-indices'),
     path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     path('api/oauth2/google/login/', google_oauth2_login),
