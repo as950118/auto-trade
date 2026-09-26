@@ -26,11 +26,9 @@ INDICES = [
 
 YAHOO_CHART_URL = 'https://query1.finance.yahoo.com/v8/finance/chart/{symbol}'
 REQUEST_TIMEOUT = (3, 5)  # (연결, 응답) 초
-# Yahoo는 브라우저가 아닌 User-Agent에 429를 주는 경우가 있어 브라우저 형식을 쓴다(로컬 실측과 같은 형식)
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) '
-    'Chrome/124.0 Safari/537.36'
-}
+# 2026-09-26 실측: 이 형식과 단순 'Mozilla/5.0'은 200, 쿠키 없이 크롬을 흉내 낸 브라우저 형식은 429였다.
+# 브라우저 UA로 바꾸지 말 것.
+HEADERS = {'User-Agent': 'Mozilla/5.0 (compatible; AutoTrade/1.0)'}
 
 # 스케줄러가 덮어쓰므로 만료 없이 둔다(프로세스 재시작 시 비고, 다음 job 실행에서 채워진다)
 CACHE_KEY = 'market_indices:v2'
