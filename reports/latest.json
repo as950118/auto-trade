@@ -1,11 +1,11 @@
 {
-  "date": "2026-10-10",
+  "date": "2026-10-11",
   "project_name": "AutoTrade Platform 일일 자동 점검",
   "teams": {
     "개발": {
       "title": "백엔드 저장소 점검 (auto-trade)",
-      "summary": "테스트 150건 전부 통과 / 오래된 패키지 28개 / 하드코딩 시크릿 의심 2건",
-      "details": "[test] 통과 (총 150건)\n[migrations] 변경 없음\n[dependencies] outdated=28\n[secret-scan] 2건 발견\n[todo] 3건",
+      "summary": "테스트 150건 전부 통과 / 오래된 패키지 27개 / 하드코딩 시크릿 의심 2건",
+      "details": "[test] 통과 (총 150건)\n[migrations] 변경 없음\n[dependencies] outdated=27\n[secret-scan] 2건 발견\n[todo] 3건",
       "counts": {
         "critical": 2,
         "high": 0,
@@ -39,7 +39,7 @@
   "auto_merged": [],
   "needs_review": [
     {
-      "title": "오래된 의존성 패키지 28개 (anyio, beautifulsoup4, cachetools, ccxt, cryptography, Django, django-cors-headers, django-filter...)",
+      "title": "오래된 의존성 패키지 27개 (anyio, beautifulsoup4, cachetools, ccxt, cryptography, Django, django-cors-headers, django-filter...)",
       "severity": "medium",
       "team": "개발"
     },
@@ -64,5 +64,5 @@
       "team": "디자인"
     }
   ],
-  "issue_url": "https://github.com/as950118/auto-trade/issues/84"
+  "issue_url": "https://github.com/as950118/auto-trade/issues/85"
 }
