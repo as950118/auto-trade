@@ -1,5 +1,5 @@
 {
-  "date": "2026-10-14",
+  "date": "2026-10-15",
   "project_name": "AutoTrade Platform 일일 자동 점검",
   "teams": {
     "개발": {
@@ -27,7 +27,7 @@
     "분석": {
       "title": "저장소 전반 점검 (이슈/PR 현황)",
       "summary": "장기 미검토 PR 없음",
-      "details": "[as950118/auto-trade] open PR=0, open issue=47\n[as950118/auto-trade-view] open PR=0, open issue=0",
+      "details": "[as950118/auto-trade] open PR=0, open issue=48\n[as950118/auto-trade-view] open PR=0, open issue=0",
       "counts": {
         "critical": 0,
         "high": 0,
@@ -64,5 +64,5 @@
       "team": "디자인"
     }
   ],
-  "issue_url": "https://github.com/as950118/auto-trade/issues/88"
+  "issue_url": "https://github.com/as950118/auto-trade/issues/89"
 }
