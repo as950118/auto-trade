@@ -1,5 +1,5 @@
 {
-  "date": "2026-10-18",
+  "date": "2026-10-19",
   "project_name": "AutoTrade Platform 일일 자동 점검",
   "teams": {
     "개발": {
@@ -64,5 +64,5 @@
       "team": "디자인"
     }
   ],
-  "issue_url": "https://github.com/as950118/auto-trade/issues/92"
+  "issue_url": "https://github.com/as950118/auto-trade/issues/93"
 }
