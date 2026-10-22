@@ -1,5 +1,5 @@
 {
-  "date": "2026-10-21",
+  "date": "2026-10-22",
   "project_name": "AutoTrade Platform 일일 자동 점검",
   "teams": {
     "개발": {
@@ -15,12 +15,12 @@
     },
     "디자인": {
       "title": "프론트엔드 저장소 점검 (auto-trade-view)",
-      "summary": "빌드 성공 / npm audit 취약점 7건",
-      "details": "[build] 성공\n[audit] {\"info\": 0, \"low\": 0, \"moderate\": 3, \"high\": 4, \"critical\": 0, \"total\": 7}",
+      "summary": "빌드 성공 / npm audit 이상 없음",
+      "details": "[build] 성공\n[audit] 데이터 없음",
       "counts": {
         "critical": 0,
-        "high": 1,
-        "medium": 1,
+        "high": 0,
+        "medium": 0,
         "low": 0
       }
     },
@@ -47,17 +47,7 @@
       "title": "Telegram Bot Token 하드코딩 의심: autotrade/settings.py:133",
       "severity": "critical",
       "team": "개발"
-    },
-    {
-      "title": "npm audit: high 등급 취약점 4건",
-      "severity": "high",
-      "team": "디자인"
-    },
-    {
-      "title": "npm audit: moderate 등급 취약점 3건",
-      "severity": "medium",
-      "team": "디자인"
     }
   ],
-  "issue_url": "https://github.com/as950118/auto-trade/issues/95"
+  "issue_url": "https://github.com/as950118/auto-trade/issues/96"
 }
